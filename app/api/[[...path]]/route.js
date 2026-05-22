@@ -342,7 +342,7 @@ async function handle(request, { params }) {
       return NextResponse.json({ output: content });
     }
 
-    // ====================== UPLOADS (Supabase Storage) ======================
+    // ====================== UPLOADS (Supabase Storage via REST) ======================
     if (path === '/uploads' && method === 'POST') {
       const body = await request.json();
       const { name, type, dataUrl, tag, size } = body;
@@ -358,14 +358,27 @@ async function handle(request, { params }) {
       const fileId = uuidv4();
       const objectPath = `${user.id}/${fileId}.${ext}`;
 
-      const admin = getSupabaseAdmin();
-      const { error: upErr } = await admin.storage.from('uploads').upload(objectPath, buffer, {
-        contentType: mime, upsert: false,
-      });
-      if (upErr) return err(`Upload failed: ${upErr.message}`, 500);
+      const SUPA_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
+      const SECRET = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-      const { data: pub } = admin.storage.from('uploads').getPublicUrl(objectPath);
-      const publicUrl = pub?.publicUrl;
+      // Direct REST upload — the secret key in Authorization bypasses RLS
+      const uploadRes = await fetch(`${SUPA_URL}/storage/v1/object/uploads/${objectPath}`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${SECRET}`,
+          'apikey': SECRET,
+          'Content-Type': mime,
+          'x-upsert': 'false',
+        },
+        body: buffer,
+      });
+
+      if (!uploadRes.ok) {
+        const t = await uploadRes.text();
+        return err(`Upload failed (${uploadRes.status}): ${t.slice(0, 200)}`, 500);
+      }
+
+      const publicUrl = `${SUPA_URL}/storage/v1/object/public/uploads/${objectPath}`;
 
       const doc = {
         id: fileId, name, type: mime, tag: tag || 'general', size: size || buffer.length,
@@ -387,7 +400,14 @@ async function handle(request, { params }) {
     if (pathArr[0] === 'uploads' && pathArr[1] && method === 'DELETE') {
       const doc = await db.collection('uploads').findOne({ id: pathArr[1], userId: user.id });
       if (doc) {
-        try { await getSupabaseAdmin().storage.from('uploads').remove([doc.objectPath]); } catch (e) {}
+        try {
+          const SUPA_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
+          const SECRET = process.env.SUPABASE_SERVICE_ROLE_KEY;
+          await fetch(`${SUPA_URL}/storage/v1/object/uploads/${doc.objectPath}`, {
+            method: 'DELETE',
+            headers: { 'Authorization': `Bearer ${SECRET}`, 'apikey': SECRET },
+          });
+        } catch (e) {}
         await db.collection('uploads').deleteOne({ id: pathArr[1], userId: user.id });
       }
       return NextResponse.json({ ok: true });

@@ -157,9 +157,9 @@ backend:
 
   - task: "Uploads to Supabase Storage (uploads bucket)"
     implemented: true
-    working: false
+    working: true
     file: "app/api/[[...path]]/route.js"
-    stuck_count: 1
+    stuck_count: 0
     priority: "high"
     needs_retesting: false
     status_history:
@@ -169,6 +169,9 @@ backend:
       - working: false
         agent: "testing"
         comment: "❌ CRITICAL: Supabase Storage RLS policy blocking uploads. POST /api/uploads returns 500 with error 'new row violates row-level security policy'. Code is correct but Supabase bucket 'uploads' has RLS enabled without policies allowing authenticated users to INSERT. FIX REQUIRED: In Supabase dashboard, either (1) add RLS policy allowing authenticated users to upload to storage.objects WHERE bucket_id='uploads' AND (storage.foldername(name))[1] = auth.uid()::text, OR (2) disable RLS on uploads bucket for MVP. This is a Supabase configuration issue, not a code bug."
+      - working: true
+        agent: "main"
+        comment: "FIXED. Replaced supabase-js upload with direct REST API: POST {SUPA_URL}/storage/v1/object/uploads/{userId}/{fileId}.{ext} with Authorization: Bearer SECRET_KEY + apikey: SECRET_KEY headers. The new sb_secret_* key format was not being recognized as service_role by supabase-js v2.106 → caused RLS enforcement. Direct REST bypasses this. Verified with curl: upload returns publicUrl, HEAD request to publicUrl returns HTTP 200 + content-type image/png. DELETE also migrated to direct REST."
 
   - task: "OpenRouter AI reliability (retries + timeouts + streaming)"
     implemented: true
