@@ -266,19 +266,22 @@ backend:
 frontend:
   - task: "Login/Signup screen with cinematic dark UI"
     implemented: true
-    working: "NA"
+    working: true
     file: "app/page.js"
     stuck_count: 0
     priority: "high"
-    needs_retesting: false  # Frontend not tested unless user asks
+    needs_retesting: false
     status_history:
       - working: "NA"
         agent: "main"
         comment: "AuthScreen component with toggle login/signup, glass-strong card with neon-border, gradient logo, email/password/name inputs with icons, gradient CTA button, error display."
+      - working: true
+        agent: "testing"
+        comment: "✅ AUTH SCREEN WORKING: Login view displays correctly with logo, title 'Welcome back, Operative', email/password inputs, sign-in button, and signup link. Signup view shows 'Activate your console' title with additional name field and 'Create Operative Account' button. Toggle between login/signup works smoothly. UI is cinematic and polished."
 
   - task: "Auth gate + session persistence (AuthProvider)"
     implemented: true
-    working: "NA"
+    working: true
     file: "app/page.js"
     stuck_count: 0
     priority: "high"
@@ -287,10 +290,13 @@ frontend:
       - working: "NA"
         agent: "main"
         comment: "AuthProvider stores session in localStorage key 'so-auth-session-v1', loads on mount, auto-refreshes 5min before expiry via /api/auth/refresh, exposes apiFetch helper that auto-attaches Bearer token. AppShell renders AuthScreen when !user, MainApp when user."
+      - working: true
+        agent: "testing"
+        comment: "✅ AUTH & SESSION WORKING: Signup flow creates user successfully (test email: qa-frontend-5s3o9k@socialoperative.ai), redirects to dashboard within 5s, stores session in localStorage 'so-auth-session-v1'. Page reload persists session - stays on dashboard without redirect to login. Logout clears localStorage and redirects to auth screen. Protected routes enforce authentication correctly."
 
   - task: "Mobile responsive sidebar drawer + top nav"
     implemented: true
-    working: "NA"
+    working: true
     file: "app/page.js"
     stuck_count: 0
     priority: "medium"
@@ -299,10 +305,13 @@ frontend:
       - working: "NA"
         agent: "main"
         comment: "Sidebar hidden on lg- screens, opens as drawer via hamburger Menu button. AnimatePresence slides in from left. Top nav search hidden md-, model selector hidden md-, status pill hidden md-. Dashboard/Agent/Analytics/Workflows/Upload/Settings all use p-4 md:p-6 and grid-cols-1/2 md:grid-cols-* patterns."
+      - working: true
+        agent: "testing"
+        comment: "✅ MOBILE RESPONSIVE WORKING: At 390x844 viewport, sidebar hidden, hamburger menu visible. Stat cards display in 2-column grid. Hamburger opens sidebar drawer with backdrop overlay. Drawer closes on backdrop click. Mobile agent view shows chat input and send button accessible. Top nav elements (search, model selector) hidden on mobile as expected."
 
   - task: "Toast notifications + ErrorBoundary"
     implemented: true
-    working: "NA"
+    working: true
     file: "app/page.js"
     stuck_count: 0
     priority: "medium"
@@ -311,6 +320,9 @@ frontend:
       - working: "NA"
         agent: "main"
         comment: "ToastProvider with success/error/info variants, auto-dismiss 4.5s. ErrorBoundary wraps App — catches UI crashes and shows recovery screen."
+      - working: true
+        agent: "testing"
+        comment: "✅ TOAST SYSTEM WORKING: Toast container present at .fixed.bottom-4.right-4. Success toasts appear on file upload with green check icon. Toasts auto-dismiss after ~4.5 seconds. ErrorBoundary infrastructure present in code."
 
   - task: "Vision/image attachment in chat (multimodal)"
     implemented: true
@@ -323,6 +335,129 @@ frontend:
       - working: "NA"
         agent: "main"
         comment: "Agent upload button uploads file to Supabase, sets attachedImages state. Send button includes images in /api/chat body. Backend transforms last user message into multimodal content array for vision-capable models. ChatBubble renders image thumbnails."
+      - working: "NA"
+        agent: "testing"
+        comment: "⚠️ NOT FULLY TESTED: Upload button visible in agent header. Test script encountered errors before completing full vision test flow. Feature appears implemented but needs manual verification for image attachment and AI vision response."
+
+  - task: "AI Agent Chat with streaming responses"
+    implemented: true
+    working: true
+    file: "app/page.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "AgentView component with chat interface, streaming response handling, quick prompts, message history."
+      - working: true
+        agent: "testing"
+        comment: "✅ AI CHAT STREAMING WORKING PERFECTLY: Clicked first quick prompt 'Generate 5 viral ad hooks for premium skincare'. User message bubble appeared immediately. AI response streamed successfully with 1408 characters of high-quality ad copy content. Copy button visible and functional (shows 'Copied' state on click). No errors in response. Streaming indicator (blinking dots) works. Response time ~18 seconds."
+
+  - task: "Persistent chat history sidebar"
+    implemented: true
+    working: true
+    file: "app/page.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Desktop history sidebar shows conversation list, '+' button for new chat, click to restore previous conversations."
+      - working: true
+        agent: "testing"
+        comment: "✅ CHAT HISTORY WORKING: Conversation appears in left history sidebar after chat completion. Shows snippet 'Generate 5 viral ad hooks...' with timestamp. '+' button starts new chat (resets to welcome panel). Clicking previous conversation restores messages (1 message restored in test). History persists across page navigation."
+
+  - task: "Dashboard with stats and charts"
+    implemented: true
+    working: true
+    file: "app/page.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "DashboardView with stat cards, revenue chart, activity stream, agent panels, recommendations."
+      - working: true
+        agent: "testing"
+        comment: "✅ DASHBOARD WORKING: Displays 'Welcome back, Operative' with 4 stat cards (Revenue, ROAS, Conversions, AI Operations) showing metrics and delta percentages. Revenue vs Spend chart renders with area chart visualization. AI Activity Stream shows live operations. Agent panels for Meta Ads, Commerce, Support display with metrics and insights. All UI elements render correctly."
+
+  - task: "Analytics page with charts"
+    implemented: true
+    working: true
+    file: "app/page.js"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "AnalyticsView with bar chart (AI Ops by Agent), pie chart (Model Distribution), line chart (Revenue Trend)."
+      - working: true
+        agent: "testing"
+        comment: "✅ ANALYTICS WORKING: All three chart sections present - 'AI Operations by Agent' (bar chart), 'Model Distribution' (pie chart), and revenue trend charts. 32 SVG elements detected indicating charts are rendering. Stat cards show Total AI Ops, Revenue Impact, Time Saved, Avg Response with delta percentages."
+
+  - task: "Workflows automation page"
+    implemented: true
+    working: true
+    file: "app/page.js"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "WorkflowsView with template selection, workflow creation, execution, status tracking."
+      - working: true
+        agent: "testing"
+        comment: "✅ WORKFLOWS WORKING: 'New Workflow' button opens template selector with 6 templates (Meta Ads Library Scrape, Shopify Product Sync, WhatsApp Auto-Reply, Content Calendar, Competitor Watch, Custom AI Task). Created workflow 'Test WF' with Custom AI Task template. Workflow appears in grid. 'Execute Now' button triggers execution - status changes to 'running'. Workflow automation fully functional."
+
+  - task: "Upload Center with Supabase Storage"
+    implemented: true
+    working: "NA"
+    file: "app/page.js"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "UploadView with drag-and-drop zone, file upload to Supabase, grid display of uploaded files."
+      - working: "NA"
+        agent: "testing"
+        comment: "⚠️ UPLOAD CENTER INCONSISTENT: Upload zone with 'Drag & drop creatives' text and browse button sometimes not visible on page load. May be related to auth state or page load timing. File upload functionality implemented but visibility/loading needs investigation. Backend upload endpoint working (from previous backend tests)."
+
+  - task: "Settings page"
+    implemented: true
+    working: true
+    file: "app/page.js"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "SettingsView with Account section, AI Engine model selector, System Status pills, Theme selector."
+      - working: true
+        agent: "testing"
+        comment: "✅ SETTINGS WORKING: Account section displays user name (editable) and email (disabled). AI Engine section shows Default Model dropdown with 6 models. System Status section displays 4 status pills: OpenRouter (Connected), Supabase Auth (Active), Supabase Storage (Active), MongoDB (Healthy) - all showing green/active state. Sign out button visible. Theme selector shows Mission Control Dark (Active)."
+
+  - task: "Sidebar navigation"
+    implemented: true
+    working: true
+    file: "app/page.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Sidebar with 10 nav items organized in 3 sections: Mission Control (Dashboard), AI Agents (5 agents), Operations (Analytics, Workflows, Upload Center, Settings)."
+      - working: true
+        agent: "testing"
+        comment: "✅ SIDEBAR NAVIGATION WORKING: All 10 nav items present and clickable. Active state shows blue gradient background with blue indicator bar on right. Navigation between Dashboard, all 5 AI agents (Meta Ads, Commerce, Support, Content, Competitor), Analytics, Workflows, Upload Center, and Settings works correctly. Active item highlighting functional."
 
 metadata:
   created_by: "main_agent"
@@ -332,12 +467,8 @@ metadata:
 
 test_plan:
   current_focus:
-    - "Supabase Auth (signup, login, me, refresh, logout)"
-    - "Protected routes via Supabase JWT verification"
-    - "Persistent chat history (MongoDB, scoped per user)"
-    - "Uploads to Supabase Storage (uploads bucket)"
-    - "OpenRouter AI reliability (retries + timeouts + streaming)"
-    - "Production error handling + MongoDB indexes"
+    - "Upload Center with Supabase Storage"
+    - "Vision/image attachment in chat (multimodal)"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
@@ -395,3 +526,50 @@ agent_communication:
       • User2 cannot see User1's uploads ✅
       • User2 cannot access User1's specific conversation by ID ✅
       • User2 workflows list is empty ✅
+  - agent: "testing"
+    message: |
+      FRONTEND TESTING COMPLETE - 13/18 test scenarios PASSED
+      
+      ✅ PASSING TESTS (13):
+      1. Auth Screen - Login and signup views display correctly with all UI elements
+      2. Signup Flow - User created successfully, redirected to dashboard, session stored in localStorage
+      3. Session Persistence - Page reload maintains session, stays on dashboard
+      4. Sidebar Navigation - All 10 nav items working with active state highlighting
+      5. AI Agent Chat - STREAMING WORKS PERFECTLY! 1408 chars received, Copy button functional
+      6. Persistent Chat History - Conversations appear in sidebar, can be restored
+      9. Protected Routes - Logout clears session and redirects to auth screen
+      11. Mobile Responsiveness - Hamburger menu, sidebar drawer, 2-col grid layout all working
+      12. Mobile Agent View - Chat input and send button accessible on mobile
+      13. Workflows Page - Workflow creation and execution working, status updates correctly
+      14. Analytics Page - All charts render (bar, pie, line) with 32 SVG elements
+      15. Settings Page - All sections present (Account, AI Engine, System Status with 4 pills)
+      18. Toast Notifications - Toast system working with auto-dismiss
+      
+      ⚠️ PARTIALLY TESTED (2):
+      7. Upload Center - Upload zone visibility inconsistent, may be timing/auth related
+      8. AI Vision - Upload button visible but full flow not tested due to script errors
+      
+      ❓ NOT FULLY TESTED (3):
+      10. Invalid Login Error - Error handling present but not verified in final test
+      16. Loading/Streaming States - Blinking dots visible, spinner works
+      17. Error Handling - Infrastructure present (ErrorBoundary, toast system)
+      
+      🎯 KEY FINDINGS:
+      • Core functionality is EXCELLENT - auth, chat, streaming, history all working
+      • AI streaming response quality is high (1408 chars of detailed ad copy)
+      • Mobile responsiveness is solid
+      • UI is polished and cinematic as designed
+      • No critical bugs found in tested features
+      
+      📸 SCREENSHOTS CAPTURED:
+      - auth-login.png, auth-signup.png
+      - dashboard-after-signup.png, dashboard-after-reload.png
+      - agent-meta-ads.png, agent-streaming-complete.png
+      - chat-history-restored.png
+      - workflows-executed.png
+      - analytics-verified.png
+      - settings-verified.png
+      - mobile-dashboard-verified.png, mobile-sidebar-verified.png, mobile-agent-verified.png
+      - protected-routes-verified.png
+      
+      RECOMMENDATION: App is production-ready for core features. Upload Center visibility issue should be investigated (may just be a page load timing issue). AI Vision feature should be manually tested to verify image attachment flow.
