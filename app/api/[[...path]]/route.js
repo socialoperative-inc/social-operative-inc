@@ -87,12 +87,64 @@ const AGENT_PROMPTS = {
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
+// Vision-capable models. Multimodal content arrays sent to non-vision models
+// can cause upstream errors at Cloudflare (manifesting as TLS alerts).
+const VISION_MODELS = new Set([
+  'anthropic/claude-3.5-sonnet',
+  'anthropic/claude-3.5-haiku',
+  'openai/gpt-4o',
+  'openai/gpt-4o-mini',
+  'google/gemini-2.0-flash-exp:free',
+  'google/gemini-flash-1.5',
+  'google/gemini-pro-1.5',
+]);
+
+// Sanitize header values — strip ALL whitespace/newlines that would corrupt the HTTP request
+// and trigger TLS/WAF rejections.
+const cleanHeader = (v) => (typeof v === 'string' ? v.replace(/[\r\n\t]/g, '').trim() : '');
+
+function validReferer(url) {
+  try {
+    const parsed = new URL(cleanHeader(url));
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return parsed.toString();
+  } catch (e) {}
+  return 'https://socialoperative.ai';
+}
+
 // ============================================================================
-// OpenRouter streaming with retry + timeout
+// OpenRouter streaming with retry + timeout + bulletproof headers
 // ============================================================================
 async function callOpenRouter({ messages, model, stream = true, temperature = 0.7, attempt = 1 }) {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) throw new Error('OPENROUTER_API_KEY not configured');
+  const rawKey = process.env.OPENROUTER_API_KEY;
+  if (!rawKey) throw new Error('OPENROUTER_API_KEY not configured');
+  const apiKey = cleanHeader(rawKey);
+  if (!apiKey || !apiKey.startsWith('sk-or-')) {
+    throw new Error('OPENROUTER_API_KEY appears invalid (expected prefix sk-or-...). Verify the key in Vercel env vars.');
+  }
+
+  const chosenModel = cleanHeader(model) || cleanHeader(process.env.OPENROUTER_DEFAULT_MODEL) || 'deepseek/deepseek-chat';
+  const referer = validReferer(process.env.NEXT_PUBLIC_BASE_URL || process.env.VERCEL_URL || 'https://socialoperative.ai');
+
+  // Strip image_url entries if model isn't vision-capable (prevents Cloudflare WAF rejection)
+  const safeMessages = Array.isArray(messages) ? messages.map(m => {
+    if (!m || typeof m !== 'object') return null;
+    if (Array.isArray(m.content) && !VISION_MODELS.has(chosenModel)) {
+      // Flatten multimodal content to plain text for non-vision models
+      const text = m.content
+        .filter(c => c?.type === 'text' && typeof c.text === 'string')
+        .map(c => c.text)
+        .join('\n');
+      return { role: m.role, content: text || '(image attached — switch to a vision-capable model like claude-3.5-sonnet or gpt-4o to analyze)' };
+    }
+    return { role: m.role, content: m.content };
+  }).filter(Boolean) : [];
+
+  const payload = JSON.stringify({
+    model: chosenModel,
+    messages: safeMessages,
+    stream,
+    temperature: typeof temperature === 'number' ? temperature : 0.7,
+  });
 
   const controller = new AbortController();
   const timeoutMs = stream ? 90000 : 60000;
@@ -104,37 +156,50 @@ async function callOpenRouter({ messages, model, stream = true, temperature = 0.
       headers: {
         'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
-        'HTTP-Referer': process.env.NEXT_PUBLIC_BASE_URL || 'https://socialoperative.ai',
+        'Accept': stream ? 'text/event-stream' : 'application/json',
+        'HTTP-Referer': referer,
         'X-Title': 'Social Operative Inc.',
+        'User-Agent': 'SocialOperative/1.0 (+https://socialoperative.ai)',
       },
-      body: JSON.stringify({
-        model: model || process.env.OPENROUTER_DEFAULT_MODEL || 'deepseek/deepseek-chat',
-        messages,
-        stream,
-        temperature,
-      }),
+      body: payload,
       signal: controller.signal,
+      // Force a new connection per request — avoids stale keep-alive sockets on serverless cold starts
+      keepalive: false,
     });
     clearTimeout(timeout);
 
     if (!res.ok) {
-      const errText = await res.text();
+      const errText = await res.text().catch(() => '');
       // Retry on transient errors
-      if (attempt < 3 && (res.status >= 500 || res.status === 429)) {
-        await new Promise(r => setTimeout(r, 1000 * attempt));
+      if (attempt < 3 && (res.status >= 500 || res.status === 429 || res.status === 408)) {
+        await new Promise(r => setTimeout(r, 800 * attempt));
         return callOpenRouter({ messages, model, stream, temperature, attempt: attempt + 1 });
       }
-      throw new Error(`OpenRouter ${res.status}: ${errText.slice(0, 300)}`);
+      throw new Error(`OpenRouter ${res.status}: ${errText.slice(0, 300) || res.statusText}`);
     }
     return res;
   } catch (err) {
     clearTimeout(timeout);
-    if (err.name === 'AbortError') throw new Error('AI request timed out');
-    if (attempt < 3 && (err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT' || err.message?.includes('fetch failed'))) {
+    const msg = err?.message || String(err);
+    const code = err?.code || err?.cause?.code || '';
+
+    if (err.name === 'AbortError') throw new Error('AI request timed out (90s). Try a faster model or shorter prompt.');
+
+    // Network / TLS / DNS — retry up to 3 times
+    const transientCodes = ['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND', 'ECONNREFUSED', 'EPIPE'];
+    const isTls = /ssl|tls|alert|handshake/i.test(msg);
+    const isFetchFail = /fetch failed/i.test(msg);
+
+    if (attempt < 3 && (transientCodes.includes(code) || isTls || isFetchFail)) {
+      console.warn(`[OpenRouter] transient error (attempt ${attempt}): ${code || msg.slice(0, 100)} — retrying...`);
       await new Promise(r => setTimeout(r, 1000 * attempt));
       return callOpenRouter({ messages, model, stream, temperature, attempt: attempt + 1 });
     }
-    throw err;
+
+    if (isTls) {
+      throw new Error(`AI provider TLS error: ${msg.slice(0, 200)}. This usually resolves on retry; if it persists, verify OPENROUTER_API_KEY in Vercel env vars (no extra whitespace/newlines) and that you're not behind a proxy with TLS interception.`);
+    }
+    throw new Error(`AI provider error: ${msg.slice(0, 250)}`);
   }
 }
 
@@ -255,12 +320,14 @@ async function handle(request, { params }) {
     if (path === '/' || path === '/health') {
       const missing = envCheck();
       const db = await getDb();
+      const rawKey = process.env.OPENROUTER_API_KEY || '';
+      const keyOk = rawKey.trim().startsWith('sk-or-');
       return NextResponse.json({
         status: missing.length === 0 ? 'operational' : 'degraded',
         platform: 'Social Operative Inc.', version: '1.0.0',
         services: {
           api: 'up',
-          ai: process.env.OPENROUTER_API_KEY ? 'configured' : 'missing-key',
+          ai: !rawKey ? 'missing-key' : keyOk ? 'configured' : 'invalid-key-format',
           auth: process.env.SUPABASE_SERVICE_ROLE_KEY ? 'configured' : 'missing-key',
           storage: process.env.NEXT_PUBLIC_SUPABASE_URL ? 'configured' : 'missing-url',
           db: db ? 'connected' : (dbInitErrorMsg || 'unreachable'),
@@ -268,6 +335,42 @@ async function handle(request, { params }) {
         missingEnv: missing,
         runtime: { node: process.version, vercel: !!process.env.VERCEL, platform: process.env.VERCEL_ENV || 'local' },
       });
+    }
+
+    // Diagnostic endpoint — direct OpenRouter connectivity test (no auth needed, no DB needed)
+    if (path === '/diag/openrouter' && method === 'GET') {
+      const rawKey = process.env.OPENROUTER_API_KEY || '';
+      if (!rawKey) return NextResponse.json({ ok: false, error: 'OPENROUTER_API_KEY missing in env vars' }, { status: 500 });
+      const apiKey = rawKey.replace(/[\r\n\t]/g, '').trim();
+      const t0 = Date.now();
+      try {
+        const r = await fetch('https://openrouter.ai/api/v1/models', {
+          headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'User-Agent': 'SocialOperative/1.0 (+https://socialoperative.ai)',
+          },
+        });
+        const elapsed = Date.now() - t0;
+        const status = r.status;
+        let body = await r.text();
+        let modelCount = 0;
+        try { const j = JSON.parse(body); modelCount = j?.data?.length || 0; } catch (e) {}
+        return NextResponse.json({
+          ok: r.ok, status, elapsed_ms: elapsed, modelCount,
+          keyPrefix: apiKey.slice(0, 10) + '...',
+          keyLength: apiKey.length,
+          referer: validReferer(process.env.NEXT_PUBLIC_BASE_URL || process.env.VERCEL_URL),
+          bodyPreview: r.ok ? '(models list received)' : body.slice(0, 300),
+        });
+      } catch (e) {
+        return NextResponse.json({
+          ok: false, error: e?.message || String(e), code: e?.code || e?.cause?.code,
+          isTLS: /ssl|tls|alert|handshake/i.test(e?.message || ''),
+          elapsed_ms: Date.now() - t0,
+          keyPrefix: apiKey.slice(0, 10) + '...',
+          keyLength: apiKey.length,
+        }, { status: 500 });
+      }
     }
 
     // ====================== AUTH (Supabase) ======================
@@ -326,7 +429,7 @@ async function handle(request, { params }) {
     }
 
     // ========== Protected route guard ==========
-    const PUBLIC_PATHS = ['/health', '/auth/signup', '/auth/login', '/auth/me', '/auth/refresh', '/auth/logout', '/stats'];
+    const PUBLIC_PATHS = ['/health', '/auth/signup', '/auth/login', '/auth/me', '/auth/refresh', '/auth/logout', '/stats', '/diag/openrouter'];
     if (!PUBLIC_PATHS.includes(path) && !user) {
       return err('Unauthorized — please log in', 401);
     }
