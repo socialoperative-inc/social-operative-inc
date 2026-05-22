@@ -4,31 +4,73 @@ import { v4 as uuidv4 } from 'uuid';
 import { getSupabaseAdmin, verifySupabaseToken } from '../../../lib/supabase/admin';
 
 // ============================================================================
-// MongoDB connection (singleton) — used for chat/scrape/activity (stable)
+// Env validation — provides clear errors instead of cryptic library crashes
+// ============================================================================
+function envCheck() {
+  const missing = [];
+  if (!process.env.OPENROUTER_API_KEY) missing.push('OPENROUTER_API_KEY');
+  if (!process.env.NEXT_PUBLIC_SUPABASE_URL) missing.push('NEXT_PUBLIC_SUPABASE_URL');
+  if (!process.env.SUPABASE_SERVICE_ROLE_KEY) missing.push('SUPABASE_SERVICE_ROLE_KEY');
+  return missing;
+}
+
+// ============================================================================
+// MongoDB connection (singleton) — resilient: returns null if unreachable,
+// route handlers must gracefully degrade rather than crash.
 // ============================================================================
 let cachedClient = null;
 let cachedDb = null;
+let dbInitFailedAt = 0;
+let dbInitErrorMsg = null;
+
 async function getDb() {
   if (cachedDb) return cachedDb;
-  const client = new MongoClient(process.env.MONGO_URL, {
-    serverSelectionTimeoutMS: 5000,
-    socketTimeoutMS: 30000,
-  });
-  await client.connect();
-  cachedClient = client;
-  cachedDb = client.db(process.env.DB_NAME || 'social_operative');
-  // Ensure indexes for performance
+
+  // Cool-down: don't hammer a broken DB on every request (15s window)
+  if (dbInitFailedAt && Date.now() - dbInitFailedAt < 15000) {
+    return null;
+  }
+
+  const url = process.env.MONGO_URL;
+  if (!url || typeof url !== 'string' || url.trim() === '') {
+    dbInitErrorMsg = 'MONGO_URL is not configured';
+    dbInitFailedAt = Date.now();
+    return null;
+  }
+
   try {
-    await cachedDb.collection('conversations').createIndex({ userId: 1, updatedAt: -1 });
-    await cachedDb.collection('conversations').createIndex({ id: 1 }, { unique: true });
-    await cachedDb.collection('activity').createIndex({ userId: 1, ts: -1 });
-    await cachedDb.collection('uploads').createIndex({ userId: 1, createdAt: -1 });
-    await cachedDb.collection('uploads').createIndex({ id: 1 }, { unique: true });
-    await cachedDb.collection('scrape_jobs').createIndex({ userId: 1, createdAt: -1 });
-    await cachedDb.collection('workflows').createIndex({ userId: 1, createdAt: -1 });
-    await cachedDb.collection('saved_prompts').createIndex({ userId: 1, createdAt: -1 });
-  } catch (e) { /* index may already exist */ }
-  return cachedDb;
+    const client = new MongoClient(url, {
+      serverSelectionTimeoutMS: 4000,
+      socketTimeoutMS: 30000,
+      connectTimeoutMS: 5000,
+    });
+    await client.connect();
+    cachedClient = client;
+    cachedDb = client.db(process.env.DB_NAME || 'social_operative');
+    dbInitErrorMsg = null;
+    dbInitFailedAt = 0;
+    // Ensure indexes (best effort, don't block on errors)
+    try {
+      await Promise.all([
+        cachedDb.collection('conversations').createIndex({ userId: 1, updatedAt: -1 }),
+        cachedDb.collection('conversations').createIndex({ id: 1 }, { unique: true }),
+        cachedDb.collection('activity').createIndex({ userId: 1, ts: -1 }),
+        cachedDb.collection('uploads').createIndex({ userId: 1, createdAt: -1 }),
+        cachedDb.collection('uploads').createIndex({ id: 1 }, { unique: true }),
+        cachedDb.collection('scrape_jobs').createIndex({ userId: 1, createdAt: -1 }),
+        cachedDb.collection('workflows').createIndex({ userId: 1, createdAt: -1 }),
+        cachedDb.collection('saved_prompts').createIndex({ userId: 1, createdAt: -1 }),
+      ]);
+    } catch (e) { /* indexes may already exist; non-fatal */ }
+    return cachedDb;
+  } catch (e) {
+    console.error('[MongoDB] connection failed:', e?.message || e);
+    dbInitErrorMsg = e?.message || 'MongoDB connection failed';
+    dbInitFailedAt = Date.now();
+    cachedDb = null;
+    cachedClient = null;
+    return null;
+  }
 }
 
 // ============================================================================
@@ -160,6 +202,7 @@ async function completeOpenRouter({ messages, model, agent, temperature = 0.7 })
 }
 
 async function logActivity(db, { agent, type, summary, model, userId = null }) {
+  if (!db) return; // graceful skip when DB unavailable
   try {
     await db.collection('activity').insertOne({
       id: uuidv4(), agent, type, summary, model, userId, ts: new Date(),
@@ -167,17 +210,33 @@ async function logActivity(db, { agent, type, summary, model, userId = null }) {
   } catch (e) { /* don't fail request on log failure */ }
 }
 
+// Safe DB op wrapper — returns fallback when DB is null OR op throws
+async function safeDbOp(db, fn, fallback = null) {
+  if (!db) return fallback;
+  try { return await fn(db); } catch (e) {
+    console.error('[safeDbOp]', e?.message || e);
+    return fallback;
+  }
+}
+
+// Safe string helper — never crashes on undefined
+const safeStr = (v) => (typeof v === 'string' ? v : '');
+
 // ============================================================================
 // Helpers
 // ============================================================================
 function getAuthToken(request) {
-  const auth = request.headers.get('authorization');
-  if (!auth?.startsWith('Bearer ')) return null;
-  return auth.slice(7);
+  try {
+    const auth = request?.headers?.get?.('authorization');
+    if (typeof auth !== 'string' || !auth.startsWith('Bearer ')) return null;
+    return auth.slice(7);
+  } catch (e) {
+    return null;
+  }
 }
 
 function err(message, status = 500) {
-  return NextResponse.json({ error: message }, { status });
+  return NextResponse.json({ error: typeof message === 'string' ? message : 'Internal error' }, { status });
 }
 
 // ============================================================================
@@ -194,9 +253,20 @@ async function handle(request, { params }) {
 
     // Routes that don't need DB
     if (path === '/' || path === '/health') {
+      const missing = envCheck();
+      const db = await getDb();
       return NextResponse.json({
-        status: 'operational', platform: 'Social Operative Inc.', version: '1.0.0',
-        services: { api: 'up', ai: 'up', auth: 'supabase', storage: 'supabase', db: 'mongo' },
+        status: missing.length === 0 ? 'operational' : 'degraded',
+        platform: 'Social Operative Inc.', version: '1.0.0',
+        services: {
+          api: 'up',
+          ai: process.env.OPENROUTER_API_KEY ? 'configured' : 'missing-key',
+          auth: process.env.SUPABASE_SERVICE_ROLE_KEY ? 'configured' : 'missing-key',
+          storage: process.env.NEXT_PUBLIC_SUPABASE_URL ? 'configured' : 'missing-url',
+          db: db ? 'connected' : (dbInitErrorMsg || 'unreachable'),
+        },
+        missingEnv: missing,
+        runtime: { node: process.version, vercel: !!process.env.VERCEL, platform: process.env.VERCEL_ENV || 'local' },
       });
     }
 
@@ -261,59 +331,81 @@ async function handle(request, { params }) {
       return err('Unauthorized — please log in', 401);
     }
 
-    const db = await getDb();
+    const db = await getDb(); // may be null if DB is unreachable — handlers must handle gracefully
 
-    // ====================== CHAT ======================
+    // ====================== CHAT (DB-independent: AI must always stream) ======================
     if (path === '/chat' && method === 'POST') {
-      const body = await request.json();
-      const { messages, model, agent, conversationId, temperature, images } = body;
-      if (!messages || messages.length === 0) return err('messages required', 400);
+      let body;
+      try { body = await request.json(); } catch (e) { return err('invalid JSON body', 400); }
+      const { messages, model, agent, conversationId, temperature, images } = body || {};
+      if (!Array.isArray(messages) || messages.length === 0) return err('messages required', 400);
+      if (!process.env.OPENROUTER_API_KEY) return err('OPENROUTER_API_KEY not configured on server', 500);
 
-      const processedMessages = [...messages];
-      if (images && images.length > 0 && processedMessages.length > 0) {
+      // Sanitize messages
+      const cleanMessages = messages
+        .filter(m => m && typeof m === 'object' && (m.role === 'user' || m.role === 'assistant' || m.role === 'system'))
+        .map(m => ({ role: m.role, content: typeof m.content === 'string' ? m.content : safeStr(m.content) }));
+
+      if (cleanMessages.length === 0) return err('no valid messages', 400);
+
+      // Multimodal: attach images to the last user message
+      const processedMessages = [...cleanMessages];
+      const imgList = Array.isArray(images) ? images.filter(u => typeof u === 'string' && u.length > 0) : [];
+      if (imgList.length > 0) {
         const last = processedMessages[processedMessages.length - 1];
-        if (last.role === 'user') {
+        if (last?.role === 'user') {
           processedMessages[processedMessages.length - 1] = {
             role: 'user',
             content: [
-              { type: 'text', text: typeof last.content === 'string' ? last.content : 'Analyze the image(s):' },
-              ...images.map(url => ({ type: 'image_url', image_url: { url } })),
+              { type: 'text', text: safeStr(last.content) || 'Analyze the image(s):' },
+              ...imgList.map(url => ({ type: 'image_url', image_url: { url } })),
             ],
           };
         }
       }
 
       const convId = conversationId || uuidv4();
-      const last = messages[messages.length - 1];
-      await db.collection('conversations').updateOne(
-        { id: convId },
-        {
-          $setOnInsert: { id: convId, agent: agent || 'default', userId: user.id, createdAt: new Date() },
-          $set: { updatedAt: new Date(), model: model || process.env.OPENROUTER_DEFAULT_MODEL },
-          $push: { messages: { id: uuidv4(), role: last.role, content: typeof last.content === 'string' ? last.content : 'image+text', images: images || [], ts: new Date() } },
-        },
-        { upsert: true }
-      );
+      const last = cleanMessages[cleanMessages.length - 1];
+
+      // Persist user message (best-effort, never blocks AI)
+      await safeDbOp(db, async (d) => {
+        await d.collection('conversations').updateOne(
+          { id: convId },
+          {
+            $setOnInsert: { id: convId, agent: agent || 'default', userId: user.id, createdAt: new Date() },
+            $set: { updatedAt: new Date(), model: model || process.env.OPENROUTER_DEFAULT_MODEL || 'deepseek/deepseek-chat' },
+            $push: { messages: { id: uuidv4(), role: last.role, content: safeStr(last.content), images: imgList, ts: new Date() } },
+          },
+          { upsert: true }
+        );
+      });
 
       await logActivity(db, {
         agent: agent || 'default', type: 'chat',
-        summary: (typeof last?.content === 'string' ? last.content : 'multimodal').slice(0, 120),
-        model: model || process.env.OPENROUTER_DEFAULT_MODEL, userId: user.id,
+        summary: safeStr(last?.content).slice(0, 120) || '(multimodal)',
+        model: model || process.env.OPENROUTER_DEFAULT_MODEL || 'deepseek/deepseek-chat',
+        userId: user.id,
       });
 
       const response = await streamOpenRouter({ messages: processedMessages, model, agent, temperature });
       response.headers.set('X-Conversation-Id', convId);
+      response.headers.set('X-DB-Status', db ? 'ok' : 'degraded');
       return response;
     }
 
     if (path === '/chat/save' && method === 'POST') {
-      const { conversationId, role, content } = await request.json();
+      let body;
+      try { body = await request.json(); } catch (e) { return err('invalid JSON body', 400); }
+      const { conversationId, role, content } = body || {};
       if (!conversationId) return err('conversationId required', 400);
-      await db.collection('conversations').updateOne(
-        { id: conversationId, userId: user.id },
-        { $set: { updatedAt: new Date() }, $push: { messages: { id: uuidv4(), role, content, ts: new Date() } } }
-      );
-      return NextResponse.json({ ok: true });
+      const ok = await safeDbOp(db, async (d) => {
+        await d.collection('conversations').updateOne(
+          { id: conversationId, userId: user.id },
+          { $set: { updatedAt: new Date() }, $push: { messages: { id: uuidv4(), role, content: safeStr(content), ts: new Date() } } }
+        );
+        return true;
+      }, false);
+      return NextResponse.json({ ok, persisted: ok });
     }
 
     // ====================== CONVERSATIONS (scoped to user) ======================
@@ -321,47 +413,54 @@ async function handle(request, { params }) {
       const url = new URL(request.url);
       const agent = url.searchParams.get('agent');
       const filter = { userId: user.id, ...(agent ? { agent } : {}) };
-      const docs = await db.collection('conversations').find(filter, { projection: { _id: 0 } }).sort({ updatedAt: -1 }).limit(50).toArray();
+      const docs = await safeDbOp(db, async (d) =>
+        d.collection('conversations').find(filter, { projection: { _id: 0 } }).sort({ updatedAt: -1 }).limit(50).toArray(),
+        []);
       return NextResponse.json({ conversations: docs });
     }
     if (pathArr[0] === 'conversations' && pathArr[1] && method === 'GET') {
-      const doc = await db.collection('conversations').findOne({ id: pathArr[1], userId: user.id }, { projection: { _id: 0 } });
+      const doc = await safeDbOp(db, async (d) =>
+        d.collection('conversations').findOne({ id: pathArr[1], userId: user.id }, { projection: { _id: 0 } }),
+        null);
       return NextResponse.json({ conversation: doc });
     }
     if (pathArr[0] === 'conversations' && pathArr[1] && method === 'DELETE') {
-      await db.collection('conversations').deleteOne({ id: pathArr[1], userId: user.id });
+      await safeDbOp(db, (d) => d.collection('conversations').deleteOne({ id: pathArr[1], userId: user.id }));
       return NextResponse.json({ ok: true });
     }
 
     // ====================== GENERATE (one-shot) ======================
     if (path === '/generate' && method === 'POST') {
-      const { agent, task, input, model } = await request.json();
-      const userMsg = `TASK: ${task}\n\nINPUT:\n${input}`;
+      let body;
+      try { body = await request.json(); } catch (e) { return err('invalid JSON body', 400); }
+      const { agent, task, input, model } = body || {};
+      if (!input) return err('input required', 400);
+      const userMsg = `TASK: ${safeStr(task)}\n\nINPUT:\n${safeStr(input)}`;
       const content = await completeOpenRouter({ messages: [{ role: 'user', content: userMsg }], agent, model });
-      await logActivity(db, { agent, type: task, summary: input.slice(0, 120), model, userId: user.id });
+      await logActivity(db, { agent, type: safeStr(task), summary: safeStr(input).slice(0, 120), model, userId: user.id });
       return NextResponse.json({ output: content });
     }
 
     // ====================== UPLOADS (Supabase Storage via REST) ======================
     if (path === '/uploads' && method === 'POST') {
-      const body = await request.json();
-      const { name, type, dataUrl, tag, size } = body;
-      if (!dataUrl || !name) return err('name and dataUrl required', 400);
+      let body;
+      try { body = await request.json(); } catch (e) { return err('invalid JSON body', 400); }
+      const { name, type, dataUrl, tag, size } = body || {};
+      if (!dataUrl || typeof dataUrl !== 'string' || !name) return err('name and dataUrl required', 400);
 
-      // Decode base64
       const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
-      if (!match) return err('invalid dataUrl', 400);
+      if (!match) return err('invalid dataUrl (expected base64 data URL)', 400);
       const mime = match[1];
       const buffer = Buffer.from(match[2], 'base64');
 
-      const ext = (name.split('.').pop() || 'bin').toLowerCase();
+      const ext = (safeStr(name).split('.').pop() || 'bin').toLowerCase();
       const fileId = uuidv4();
       const objectPath = `${user.id}/${fileId}.${ext}`;
 
       const SUPA_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
       const SECRET = process.env.SUPABASE_SERVICE_ROLE_KEY;
+      if (!SUPA_URL || !SECRET) return err('Supabase storage not configured', 500);
 
-      // Direct REST upload — the secret key in Authorization bypasses RLS
       const uploadRes = await fetch(`${SUPA_URL}/storage/v1/object/uploads/${objectPath}`, {
         method: 'POST',
         headers: {
@@ -379,159 +478,175 @@ async function handle(request, { params }) {
       }
 
       const publicUrl = `${SUPA_URL}/storage/v1/object/public/uploads/${objectPath}`;
-
       const doc = {
         id: fileId, name, type: mime, tag: tag || 'general', size: size || buffer.length,
         userId: user.id, objectPath, publicUrl, createdAt: new Date(),
       };
-      await db.collection('uploads').insertOne(doc);
+      await safeDbOp(db, (d) => d.collection('uploads').insertOne(doc));
       await logActivity(db, { agent: 'upload', type: 'upload', summary: `Uploaded ${name}`, model: '-', userId: user.id });
       const { _id, ...rest } = doc;
       return NextResponse.json({ upload: rest });
     }
 
     if (path === '/uploads' && method === 'GET') {
-      const docs = await db.collection('uploads')
-        .find({ userId: user.id }, { projection: { _id: 0 } })
-        .sort({ createdAt: -1 }).limit(60).toArray();
+      const docs = await safeDbOp(db, async (d) =>
+        d.collection('uploads').find({ userId: user.id }, { projection: { _id: 0 } }).sort({ createdAt: -1 }).limit(60).toArray(),
+        []);
       return NextResponse.json({ uploads: docs });
     }
 
     if (pathArr[0] === 'uploads' && pathArr[1] && method === 'DELETE') {
-      const doc = await db.collection('uploads').findOne({ id: pathArr[1], userId: user.id });
+      const doc = await safeDbOp(db, (d) => d.collection('uploads').findOne({ id: pathArr[1], userId: user.id }), null);
       if (doc) {
         try {
           const SUPA_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
           const SECRET = process.env.SUPABASE_SERVICE_ROLE_KEY;
-          await fetch(`${SUPA_URL}/storage/v1/object/uploads/${doc.objectPath}`, {
-            method: 'DELETE',
-            headers: { 'Authorization': `Bearer ${SECRET}`, 'apikey': SECRET },
-          });
+          if (SUPA_URL && SECRET) {
+            await fetch(`${SUPA_URL}/storage/v1/object/uploads/${doc.objectPath}`, {
+              method: 'DELETE',
+              headers: { 'Authorization': `Bearer ${SECRET}`, 'apikey': SECRET },
+            });
+          }
         } catch (e) {}
-        await db.collection('uploads').deleteOne({ id: pathArr[1], userId: user.id });
+        await safeDbOp(db, (d) => d.collection('uploads').deleteOne({ id: pathArr[1], userId: user.id }));
       }
       return NextResponse.json({ ok: true });
     }
 
     // ====================== SAVED PROMPTS ======================
     if (path === '/saved-prompts' && method === 'GET') {
-      const docs = await db.collection('saved_prompts').find({ userId: user.id }, { projection: { _id: 0 } }).sort({ createdAt: -1 }).toArray();
+      const docs = await safeDbOp(db, (d) => d.collection('saved_prompts').find({ userId: user.id }, { projection: { _id: 0 } }).sort({ createdAt: -1 }).toArray(), []);
       return NextResponse.json({ prompts: docs });
     }
     if (path === '/saved-prompts' && method === 'POST') {
-      const body = await request.json();
-      const doc = { id: uuidv4(), title: body.title, prompt: body.prompt, agent: body.agent || 'default', tags: body.tags || [], userId: user.id, createdAt: new Date() };
-      await db.collection('saved_prompts').insertOne(doc);
+      let body; try { body = await request.json(); } catch (e) { return err('invalid JSON body', 400); }
+      const doc = { id: uuidv4(), title: safeStr(body?.title), prompt: safeStr(body?.prompt), agent: body?.agent || 'default', tags: body?.tags || [], userId: user.id, createdAt: new Date() };
+      await safeDbOp(db, (d) => d.collection('saved_prompts').insertOne(doc));
       const { _id, ...rest } = doc;
       return NextResponse.json({ prompt: rest });
     }
     if (pathArr[0] === 'saved-prompts' && pathArr[1] && method === 'DELETE') {
-      await db.collection('saved_prompts').deleteOne({ id: pathArr[1], userId: user.id });
+      await safeDbOp(db, (d) => d.collection('saved_prompts').deleteOne({ id: pathArr[1], userId: user.id }));
       return NextResponse.json({ ok: true });
     }
 
     // ====================== WORKFLOWS ======================
     if (path === '/workflows' && method === 'GET') {
-      const docs = await db.collection('workflows').find({ userId: user.id }, { projection: { _id: 0 } }).sort({ createdAt: -1 }).toArray();
+      const docs = await safeDbOp(db, (d) => d.collection('workflows').find({ userId: user.id }, { projection: { _id: 0 } }).sort({ createdAt: -1 }).toArray(), []);
       return NextResponse.json({ workflows: docs });
     }
     if (path === '/workflows' && method === 'POST') {
-      const body = await request.json();
-      const doc = { id: uuidv4(), name: body.name, type: body.type, schedule: body.schedule || 'manual', config: body.config || {}, status: 'idle', runs: 0, userId: user.id, createdAt: new Date() };
-      await db.collection('workflows').insertOne(doc);
+      let body; try { body = await request.json(); } catch (e) { return err('invalid JSON body', 400); }
+      const doc = { id: uuidv4(), name: safeStr(body?.name), type: safeStr(body?.type) || 'ai-task', schedule: body?.schedule || 'manual', config: body?.config || {}, status: 'idle', runs: 0, userId: user.id, createdAt: new Date() };
+      await safeDbOp(db, (d) => d.collection('workflows').insertOne(doc));
       const { _id, ...rest } = doc;
       return NextResponse.json({ workflow: rest });
     }
     if (pathArr[0] === 'workflows' && pathArr[1] === 'run' && pathArr[2] && method === 'POST') {
       const id = pathArr[2];
-      await db.collection('workflows').updateOne({ id, userId: user.id }, { $set: { status: 'running', lastRunAt: new Date() }, $inc: { runs: 1 } });
-      const wf = await db.collection('workflows').findOne({ id, userId: user.id });
-      await logActivity(db, { agent: 'workflow', type: wf?.type || 'workflow', summary: `Executed: ${wf?.name}`, model: '-', userId: user.id });
+      await safeDbOp(db, (d) => d.collection('workflows').updateOne({ id, userId: user.id }, { $set: { status: 'running', lastRunAt: new Date() }, $inc: { runs: 1 } }));
+      const wf = await safeDbOp(db, (d) => d.collection('workflows').findOne({ id, userId: user.id }), null);
+      await logActivity(db, { agent: 'workflow', type: wf?.type || 'workflow', summary: `Executed: ${wf?.name || id}`, model: '-', userId: user.id });
       setTimeout(async () => {
-        try { const db2 = await getDb(); await db2.collection('workflows').updateOne({ id }, { $set: { status: 'completed' } }); } catch (e) {}
+        try { const db2 = await getDb(); if (db2) await db2.collection('workflows').updateOne({ id }, { $set: { status: 'completed' } }); } catch (e) {}
       }, 1500);
       return NextResponse.json({ ok: true });
     }
     if (pathArr[0] === 'workflows' && pathArr[1] && method === 'DELETE') {
-      await db.collection('workflows').deleteOne({ id: pathArr[1], userId: user.id });
+      await safeDbOp(db, (d) => d.collection('workflows').deleteOne({ id: pathArr[1], userId: user.id }));
       return NextResponse.json({ ok: true });
     }
 
-    // ====================== META ADS SCRAPER ======================
+    // ====================== META ADS SCRAPER (Playwright — disabled on Vercel) ======================
     if (path === '/scrape/meta-ads' && method === 'POST') {
-      const { query, country = 'US', limit = 8 } = await request.json();
+      if (process.env.VERCEL) {
+        return err('Meta Ads scraper is not available on Vercel serverless (Chromium too large). Deploy on Emergent native or a VPS to enable.', 501);
+      }
+      let body; try { body = await request.json(); } catch (e) { return err('invalid JSON body', 400); }
+      const { query, country = 'US', limit = 8 } = body || {};
       if (!query) return err('query required', 400);
       const jobId = uuidv4();
-      await db.collection('scrape_jobs').insertOne({
+      await safeDbOp(db, (d) => d.collection('scrape_jobs').insertOne({
         id: jobId, type: 'meta-ads', query, country, status: 'running', userId: user.id, createdAt: new Date(),
-      });
+      }));
       try {
         const { scrapeMetaAds } = require('../../../lib/scrapers/meta-ads.js');
         const ads = await scrapeMetaAds({ query, country, limit });
-        await db.collection('scrape_jobs').updateOne({ id: jobId },
-          { $set: { status: 'completed', completedAt: new Date(), resultCount: ads.length, results: ads } });
+        await safeDbOp(db, (d) => d.collection('scrape_jobs').updateOne({ id: jobId },
+          { $set: { status: 'completed', completedAt: new Date(), resultCount: ads.length, results: ads } }));
         await logActivity(db, { agent: 'competitor', type: 'meta-scrape', summary: `Scraped ${ads.length} ads for "${query}"`, model: 'playwright', userId: user.id });
         return NextResponse.json({ jobId, query, count: ads.length, ads });
       } catch (e) {
-        await db.collection('scrape_jobs').updateOne({ id: jobId }, { $set: { status: 'failed', error: e.message } });
+        await safeDbOp(db, (d) => d.collection('scrape_jobs').updateOne({ id: jobId }, { $set: { status: 'failed', error: e.message } }));
         return err(`Scrape failed: ${e.message}`, 500);
       }
     }
     if (path === '/scrape/jobs' && method === 'GET') {
-      const jobs = await db.collection('scrape_jobs').find({ userId: user.id }, { projection: { _id: 0, results: 0 } }).sort({ createdAt: -1 }).limit(30).toArray();
+      const jobs = await safeDbOp(db, (d) => d.collection('scrape_jobs').find({ userId: user.id }, { projection: { _id: 0, results: 0 } }).sort({ createdAt: -1 }).limit(30).toArray(), []);
       return NextResponse.json({ jobs });
     }
     if (pathArr[0] === 'scrape' && pathArr[1] === 'jobs' && pathArr[2] && method === 'GET') {
-      const job = await db.collection('scrape_jobs').findOne({ id: pathArr[2], userId: user.id }, { projection: { _id: 0 } });
+      const job = await safeDbOp(db, (d) => d.collection('scrape_jobs').findOne({ id: pathArr[2], userId: user.id }, { projection: { _id: 0 } }), null);
       return NextResponse.json({ job });
     }
 
     // ====================== ACTIVITY ======================
     if (path === '/activity' && method === 'GET') {
-      const docs = await db.collection('activity').find({ userId: user.id }, { projection: { _id: 0 } }).sort({ ts: -1 }).limit(40).toArray();
+      const docs = await safeDbOp(db, (d) => d.collection('activity').find({ userId: user.id }, { projection: { _id: 0 } }).sort({ ts: -1 }).limit(40).toArray(), []);
       return NextResponse.json({ activity: docs });
     }
 
-    // ====================== STATS (public — for landing) ======================
+    // ====================== STATS (works even with no DB) ======================
     if (path === '/stats' && method === 'GET') {
       const userFilter = user ? { userId: user.id } : {};
-      const [convCount, uploadCount, activityCount, workflowCount, scrapeCount] = await Promise.all([
-        db.collection('conversations').countDocuments(userFilter),
-        db.collection('uploads').countDocuments(userFilter),
-        db.collection('activity').countDocuments(userFilter),
-        db.collection('workflows').countDocuments(userFilter),
-        db.collection('scrape_jobs').countDocuments(userFilter),
-      ]);
+      const counts = await safeDbOp(db, async (d) => {
+        const [convCount, uploadCount, activityCount, workflowCount, scrapeCount] = await Promise.all([
+          d.collection('conversations').countDocuments(userFilter),
+          d.collection('uploads').countDocuments(userFilter),
+          d.collection('activity').countDocuments(userFilter),
+          d.collection('workflows').countDocuments(userFilter),
+          d.collection('scrape_jobs').countDocuments(userFilter),
+        ]);
+        return { convCount, uploadCount, activityCount, workflowCount, scrapeCount };
+      }, { convCount: 0, uploadCount: 0, activityCount: 0, workflowCount: 0, scrapeCount: 0 });
+
       const recentActivity = user
-        ? await db.collection('activity').find({ userId: user.id }, { projection: { _id: 0 } }).sort({ ts: -1 }).limit(7).toArray()
+        ? await safeDbOp(db, (d) => d.collection('activity').find({ userId: user.id }, { projection: { _id: 0 } }).sort({ ts: -1 }).limit(7).toArray(), [])
         : [];
+
       const now = Date.now();
       const revenueSeries = Array.from({ length: 14 }, (_, i) => ({
         day: new Date(now - (13 - i) * 86400000).toLocaleDateString('en', { month: 'short', day: 'numeric' }),
         revenue: Math.round(8500 + Math.sin(i / 2) * 2200 + Math.random() * 1500),
         spend: Math.round(2400 + Math.cos(i / 2) * 600 + Math.random() * 400),
       }));
+
       return NextResponse.json({
         metrics: {
           revenue: { value: 184290, delta: 12.4, label: 'Revenue (30d)' },
           roas: { value: 4.82, delta: 8.1, label: 'Blended ROAS' },
           conversions: { value: 2847, delta: 23.7, label: 'Conversions' },
-          aiCalls: { value: activityCount, delta: 41.2, label: 'AI Operations' },
+          aiCalls: { value: counts.activityCount, delta: 41.2, label: 'AI Operations' },
           agents: { value: 5, delta: 0, label: 'Active Agents' },
-          workflows: { value: workflowCount, delta: 0, label: 'Workflows' },
-          conversations: { value: convCount, delta: 0, label: 'Conversations' },
-          uploads: { value: uploadCount, delta: 0, label: 'Uploads' },
-          scrapes: { value: scrapeCount, delta: 0, label: 'Scrape Jobs' },
+          workflows: { value: counts.workflowCount, delta: 0, label: 'Workflows' },
+          conversations: { value: counts.convCount, delta: 0, label: 'Conversations' },
+          uploads: { value: counts.uploadCount, delta: 0, label: 'Uploads' },
+          scrapes: { value: counts.scrapeCount, delta: 0, label: 'Scrape Jobs' },
         },
         revenueSeries, recentActivity,
-        health: { api: 'operational', db: 'operational', ai: 'operational', auth: 'operational', storage: 'operational', uptime: '99.98%' },
+        health: {
+          api: 'operational',
+          db: db ? 'operational' : 'unavailable',
+          ai: process.env.OPENROUTER_API_KEY ? 'operational' : 'missing-key',
+          auth: 'operational', storage: 'operational', uptime: '99.98%',
+        },
       });
     }
 
     return err(`Route not found: ${path}`, 404);
   } catch (e) {
-    console.error('API error:', e);
-    return err(e.message || 'Internal server error', 500);
+    console.error('[API error]', e?.stack || e);
+    return err(e?.message || 'Internal server error', 500);
   }
 }
 
@@ -540,4 +655,8 @@ export const POST = handle;
 export const PUT = handle;
 export const DELETE = handle;
 export const PATCH = handle;
-export const maxDuration = 120;
+
+// Vercel runtime config (required for MongoDB + Supabase admin client)
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+export const maxDuration = 60;
