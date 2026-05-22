@@ -321,7 +321,7 @@ async function handle(request, { params }) {
       const missing = envCheck();
       const db = await getDb();
       const rawKey = process.env.OPENROUTER_API_KEY || '';
-      const keyOk = rawKey.trim().startsWith('sk-or-');
+      const keyOk = (rawKey || '').trim().startsWith('sk-or-')
       return NextResponse.json({
         status: missing.length === 0 ? 'operational' : 'degraded',
         platform: 'Social Operative Inc.', version: '1.0.0',
