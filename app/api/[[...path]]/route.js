@@ -364,8 +364,8 @@ async function handle(request, { params }) {
     if (path === '/' || path === '/health') {
       const missing = envCheck();
       const db = await getDb();
-      const rawKey = safeStr(process.env.OPENROUTER_API_KEY).trim();
-      const keyOk = rawKey.startsWith('sk-or-');
+      const rawKey = process.env.OPENROUTER_API_KEY || '';
+      const keyOk = (rawKey || '').trim().startsWith('sk-or-')
       return NextResponse.json({
         status: missing.length === 0 ? 'operational' : 'degraded',
         platform: 'Social Operative Inc.',
