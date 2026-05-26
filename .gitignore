@@ -77,6 +77,10 @@ agenthub/agents/youtube/db
 
 memory/test_credentials.md
 
+# Scraper backend code (lives in a SEPARATE GitHub repo: metaads-scraper)
+# Keep this folder out of the frontend repo on "Save to GitHub".
+/metaads-scraper/
+
 # Mobile development
 android-sdk/node_modules/@next/swc-linux-arm64-gnu/next-swc.linux-arm64-gnu.node
 node_modules/@next/swc-linux-arm64-musl/next-swc.linux-arm64-musl.node
