@@ -14,6 +14,7 @@ import {
   LineChart, Line, ResponsiveContainer, XAxis, YAxis, Tooltip, AreaChart, Area,
   BarChart, Bar, PieChart, Pie, Cell
 } from 'recharts';
+import MetaAdsIntelligenceView from '../components/meta-ads/MetaAdsIntelligenceView';
 
 // ============================================================================
 // AUTH CONTEXT
@@ -1488,7 +1489,8 @@ function SettingsView({ model, setModel, user, onLogout }) {
 // MAIN APP (gated by auth)
 // ============================================================================
 function MainApp() {
-  const { user, logout } = useAuth();
+  const { user, logout, apiFetch } = useAuth();
+  const { toast } = useToast();
   const [view, setView] = useState('dashboard');
   const [model, setModel] = useState('deepseek/deepseek-chat');
   const [mobileSidebar, setMobileSidebar] = useState(false);
@@ -1506,7 +1508,14 @@ function MainApp() {
           <AnimatePresence mode="wait">
             <motion.div key={view} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
               {view === 'dashboard' && <DashboardView onAgentSelect={setView} />}
-              {AGENTS[view] && <AgentView agentKey={view} model={model} />}
+              {view === 'meta-ads' && (
+                <MetaAdsIntelligenceView
+                  apiFetch={apiFetch}
+                  toast={toast}
+                  AgentChat={<AgentView agentKey="meta-ads" model={model} />}
+                />
+              )}
+              {AGENTS[view] && view !== 'meta-ads' && <AgentView agentKey={view} model={model} />}
               {view === 'analytics' && <AnalyticsView />}
               {view === 'workflows' && <WorkflowsView />}
               {view === 'uploads' && <UploadView />}
