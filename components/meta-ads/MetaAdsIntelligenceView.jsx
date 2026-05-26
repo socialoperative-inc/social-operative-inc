@@ -945,8 +945,25 @@ function AdModal({ ad, onClose, onSave, saved }) {
               {saved ? <BookmarkCheck className="w-4 h-4" /> : <Bookmark className="w-4 h-4" />}
               {saved ? 'Saved' : 'Save ad'}
             </button>
+            {ad.metaAdsLibraryUrl && (
+              <a 
+                href={ad.metaAdsLibraryUrl} 
+                target="_blank" 
+                rel="noopener noreferrer" 
+                className="px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-xs flex items-center gap-1.5 whitespace-nowrap"
+                title="Open in Meta Ads Library"
+              >
+                <ExternalLink className="w-3.5 h-3.5" /> Meta Ads
+              </a>
+            )}
             {ad.pageUrl && (
-              <a href={ad.pageUrl} target="_blank" rel="noopener noreferrer" className="px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-xs flex items-center gap-1.5">
+              <a 
+                href={ad.pageUrl} 
+                target="_blank" 
+                rel="noopener noreferrer" 
+                className="px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-xs flex items-center gap-1.5"
+                title="View advertiser page"
+              >
                 <ExternalLink className="w-3.5 h-3.5" /> Page
               </a>
             )}
