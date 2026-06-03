@@ -679,7 +679,7 @@ function AdCard({ ad, saved, onSave, onOpen }) {
             alt={ad.headline || ad.pageName} 
             loading="lazy" 
             className="w-full h-full object-cover transition-opacity duration-300" 
-            referrerPolicy="no-referrer" 
+            crossOrigin="anonymous"
             onError={handleImageError}
           />
         ) : (
@@ -819,7 +819,7 @@ function AdModal({ ad, onClose, onSave, saved }) {
             <video src={ad.videoUrl} poster={validPoster} controls autoPlay className="w-full max-h-[80vh] object-contain" onError={(e) => { e.currentTarget.style.display = 'none'; }} />
           ) : validPoster ? (
             // eslint-disable-next-line @next/next/no-img-element
-            <img src={validPoster} alt="ad creative" className="w-full max-h-[80vh] object-contain" referrerPolicy="no-referrer" onError={(e) => { e.currentTarget.style.opacity = '0.3'; }} />
+            <img src={validPoster} alt="ad creative" className="w-full max-h-[80vh] object-contain" crossOrigin="anonymous" onError={(e) => { e.currentTarget.style.opacity = '0.3'; }} />
           ) : (
             <div className="p-12 text-white/30 flex flex-col items-center gap-2">
               <ImageIcon className="w-10 h-10" />
@@ -1117,7 +1117,7 @@ function CompetitorTab({ api, toast, online }) {
                     <a key={ad.adId} href={ad.landingUrl || '#'} target="_blank" rel="noopener noreferrer" className="block aspect-square bg-black/50 rounded-lg overflow-hidden relative group border border-white/5">
                       {(ad.videoPoster || ad.imageUrl) ? (
                         // eslint-disable-next-line @next/next/no-img-element
-                        <img src={ad.videoPoster || ad.imageUrl} alt={ad.headline || ''} loading="lazy" referrerPolicy="no-referrer" className="w-full h-full object-cover group-hover:scale-105 transition duration-300" onError={(e) => { e.currentTarget.style.opacity = '0.2'; }} />
+                        <img src={ad.videoPoster || ad.imageUrl} alt={ad.headline || ''} loading="lazy" crossOrigin="anonymous" className="w-full h-full object-cover group-hover:scale-105 transition duration-300" onError={(e) => { e.currentTarget.style.opacity = '0.2'; }} />
                       ) : <div className="flex items-center justify-center h-full text-white/30"><ImageIcon className="w-6 h-6" /></div>}
                       {ad.mediaType === 'video' && (
                         <div className="absolute top-1.5 left-1.5 px-1.5 py-0.5 bg-black/70 rounded text-[9px] flex items-center gap-1">
