@@ -1,0 +1,29 @@
+# =============================================================================
+# Vercel Frontend - Production Environment Variables
+# Add these in Vercel Dashboard → Settings → Environment Variables
+# =============================================================================
+
+# --- Meta Ads Scraper Backend (Railway/Render URL) ---
+# REPLACE with your actual Railway/Render deployment URL
+NEXT_PUBLIC_API_URL=https://your-railway-app.up.railway.app
+METAADS_SCRAPER_URL=https://your-railway-app.up.railway.app
+
+# --- Scraper API Key (MUST match backend SCRAPER_API_KEY) ---
+# Use the SAME 32-character key you generated for the backend
+METAADS_SCRAPER_API_KEY=REPLACE_WITH_SAME_32_CHAR_KEY_FROM_BACKEND
+
+# --- Supabase (Already configured - keep existing values) ---
+NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your-supabase-anon-key
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+
+# --- MongoDB (Already configured - keep existing values) ---
+MONGO_URL=mongodb+srv://username:password@cluster.mongodb.net/
+DB_NAME=social_operative
+
+# --- OpenRouter AI (Already configured - keep existing values) ---
+OPENROUTER_API_KEY=your-openrouter-api-key
+
+# --- Application ---
+NEXT_PUBLIC_BASE_URL=https://social-operative-inc.vercel.app
+NODE_ENV=production

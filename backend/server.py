@@ -1,89 +1,59 @@
-from fastapi import FastAPI, APIRouter
-from dotenv import load_dotenv
-from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
-import os
-import logging
-from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List
-import uuid
-from datetime import datetime, timezone
+"""
+Lightweight FastAPI proxy.
+
+This container ships with supervisor expecting a backend on port 8001.
+The actual application is a Next.js app running on port 3000 (which serves
+both the UI and its own /api/* routes). This proxy simply forwards every
+incoming request to the Next.js server so the public ingress (which routes
+/api/* to port 8001) keeps working without supervisor config changes.
+"""
+import httpx
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import StreamingResponse
+
+NEXT_ORIGIN = "http://localhost:3000"
+
+app = FastAPI(title="Next.js API proxy")
+
+# Single long-lived client for connection pooling.
+_client = httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0), follow_redirects=False)
 
 
-ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / '.env')
-
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
-
-# Create the main app without a prefix
-app = FastAPI()
-
-# Create a router with the /api prefix
-api_router = APIRouter(prefix="/api")
+@app.get("/healthz")
+async def healthz():
+    return {"ok": True, "proxy_to": NEXT_ORIGIN}
 
 
-# Define Models
-class StatusCheck(BaseModel):
-    model_config = ConfigDict(extra="ignore")  # Ignore MongoDB's _id field
-    
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    client_name: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-class StatusCheckCreate(BaseModel):
-    client_name: str
-
-# Add your routes to the router instead of directly to app
-@api_router.get("/")
-async def root():
-    return {"message": "Hello World"}
-
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.model_dump()
-    status_obj = StatusCheck(**status_dict)
-    
-    # Convert to dict and serialize datetime to ISO string for MongoDB
-    doc = status_obj.model_dump()
-    doc['timestamp'] = doc['timestamp'].isoformat()
-    
-    _ = await db.status_checks.insert_one(doc)
-    return status_obj
-
-@api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    # Exclude MongoDB's _id field from the query results
-    status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
-    
-    # Convert ISO string timestamps back to datetime objects
-    for check in status_checks:
-        if isinstance(check['timestamp'], str):
-            check['timestamp'] = datetime.fromisoformat(check['timestamp'])
-    
-    return status_checks
-
-# Include the router in the main app
-app.include_router(api_router)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
-    allow_methods=["*"],
-    allow_headers=["*"],
+@app.api_route(
+    "/{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
 )
+async def proxy(path: str, request: Request):
+    # Build upstream URL preserving path + query string.
+    upstream_url = f"{NEXT_ORIGIN}/{path}"
+    if request.url.query:
+        upstream_url = f"{upstream_url}?{request.url.query}"
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+    # Filter hop-by-hop / forbidden headers.
+    hop = {"host", "content-length", "connection", "transfer-encoding", "accept-encoding"}
+    fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in hop}
 
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()
+    body = await request.body()
+
+    upstream = await _client.request(
+        request.method,
+        upstream_url,
+        content=body,
+        headers=fwd_headers,
+    )
+
+    # Filter response hop-by-hop headers.
+    resp_hop = {"content-encoding", "transfer-encoding", "connection", "content-length"}
+    resp_headers = {k: v for k, v in upstream.headers.items() if k.lower() not in resp_hop}
+
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        headers=resp_headers,
+        media_type=upstream.headers.get("content-type"),
+    )
