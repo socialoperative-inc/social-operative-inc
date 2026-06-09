@@ -4,90 +4,48 @@
 > Container preview: https://github-source.preview.emergentagent.com
 > Production: https://social-operative-inc.vercel.app
 
-## Original problem statement
-Connect to existing GitHub repository as single source of truth. Analyze the
-codebase before making changes, then add a Shopify Commerce Hub directly below
-Competitor Intelligence in the sidebar. Manage Shopify entirely from inside
-Social Operative — products, orders, customers, inventory, collections — with
-full OAuth, encrypted token storage, and a beautiful onboarding flow.
-
-## Architecture (unchanged)
-- **Framework**: Next.js 14 App Router (single Vercel deploy)
-- **DB**: MongoDB Atlas, `socialoperative` database
-- **Auth**: Supabase (service-role server-side, anon browser-side)
-- **AI**: OpenRouter
-- **Meta Ads scraper**: Railway-hosted Express + Playwright microservice
-- **Container preview**: Next.js on :3000, FastAPI thin proxy on :8001 forwarding `/api/*`
-
-## Core personas
-- **DTC operator / agency manager**: signs in, connects Shopify + Meta + AI
-  agents, runs daily ops without leaving the app.
-- **Solo merchant**: connects a single Shopify store, uses AI agents and the
-  Commerce Hub for daily product / order management.
-
 ## Implementation log
 
-### 2026-01 — Repo import + preview wiring
-- Imported repo into `/app/frontend` (preserving file structure).
-- Created FastAPI proxy at `/app/backend/server.py` (forwards `/api/*` → Next.js).
-- Wired `.env.local` with real Supabase + OpenRouter + Mongo Atlas credentials.
+### 2026-01 — Repo import + preview wiring (done)
+- Imported repo into `/app/frontend` preserving file structure.
+- FastAPI proxy at `/app/backend/server.py` forwards `/api/*` to Next.js on :3000.
+- `.env.local` wired with Supabase, OpenRouter, Mongo Atlas credentials.
 
-### 2026-01 — Shopify Commerce Hub MVP (this milestone)
-**New files**
-- `lib/shopify/crypto.js` — AES-256-GCM token-at-rest encryption.
-- `lib/shopify/hmac.js` — OAuth + webhook HMAC verification (timing-safe).
-- `lib/shopify/validate.js` — shop-domain validator/normalizer.
-- `lib/shopify/client.js` — REST + GraphQL Admin API client with 429 retry.
-- `app/api/shopify/[[...path]]/route.js` — isolated Shopify catch-all
-  (install, callback, stores, sync, products CRUD + images, orders, customers,
-  collections, inventory, dashboard).
-- `components/commerce-hub/CommerceHubView.jsx` — full Commerce Hub UI
-  (onboarding, store header, dashboard, products with editor modal,
-  orders, customers, collections, inventory).
-- `.env.example` — documented env template.
+### 2026-01 — Shopify Commerce Hub MVP (done)
+- Sidebar item added between Competitor Intelligence and Analytics.
+- Onboarding screen with future-platform placeholders (WooCommerce, Amazon, Etsy, TikTok Shop).
+- OAuth flow with HMAC + state nonce + AES-256-GCM token encryption.
 
-**Modified files**
-- `app/page.js` — added `Store` icon import, `commerce-hub` sidebar item
-  between Competitor Intelligence and Analytics, and the view dispatch.
-- `.env.local` — added Shopify keys + `SHOPIFY_ENCRYPTION_KEY`.
-- `package.json` — `start` script binds `0.0.0.0:3000` for the preview container.
+### 2026-01 — Shopify Commerce Hub COMPLETE (this milestone)
+**Phase 1 — OAuth** — each step now logs into `sync_logs`
+(install_start → hmac_verify → state_verify → token_exchange → persist → webhook_register).
+**Phase 2 — Multi-store** — `/stores/:id/reconnect` returns a fresh install URL;
+unlimited stores per user enforced via `{userId, shopDomain}` unique index.
+**Phase 3 — Product Sync** — `lib/shopify/sync.js syncProducts()` paginates the
+full catalog into `shopify_products` and `shopify_variants` collections.
+**Phase 4 — Orders** — `syncOrders()` upserts full orders with payment +
+fulfillment status, customer summary into `shopify_orders`.
+**Phase 5 — Customers** — `syncCustomers()` upserts into `shopify_customers`
+with phone, orders count, total spent, tags.
+**Phase 6 — Inventory** — `syncInventory()` joins variants → inventory_levels
+across all store locations; persists to `shopify_inventory`. Low-stock filter
+(`?lowStock=1`) and dashboard counter.
+**Phase 7 — Webhooks** — `/api/shopify/webhooks` (POST) with raw-body HMAC
+verification, dispatches to per-topic handlers, logs every receipt to
+`shopify_webhooks` (status: ok | rejected | orphan | dispatch_error).
+Auto-registered during OAuth callback for all 9 topics:
+  products/create, products/update, products/delete,
+  orders/create, orders/updated,
+  customers/create, customers/update,
+  inventory_levels/update,
+  app/uninstalled.
+**Phase 8 — DB** — All 8 collections + indexes auto-created on first connect.
+**Phase 9 — Testing** — Verified end-to-end via curl: config, install URL,
+webhook POST with valid HMAC = 200, bad HMAC = 401, sync_logs records
+install_start, all auth-gated endpoints return 401 without bearer token.
 
-**Database changes (auto-created on first call)**
-- Collection `shopify_stores` — indexes: `{userId, shopDomain}` (unique),
-  `{id}` (unique).
-- Collection `shopify_oauth_state` — indexes: `{state}` (unique),
-  `{expiresAt}` TTL.
-
-**Environment variables added**
-- `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`, `SHOPIFY_APP_URL`
-- `SHOPIFY_API_VERSION` (default `2026-04`)
-- `SHOPIFY_APP_SCOPES`
-- `SHOPIFY_ENCRYPTION_KEY` (auto-generated, 32-byte base64)
-
-**OAuth scopes requested**
-`read_products, write_products, read_orders, read_customers, read_inventory,
-write_inventory, read_markets, read_publications, read_content, write_content`
-
-**Security**
-- AES-256-GCM at-rest token encryption.
-- Strict shop-domain regex (`^[a-z0-9][a-z0-9-]*\.myshopify\.com$`).
-- HMAC verification on OAuth callback (timing-safe `crypto.timingSafeEqual`).
-- 10-minute TTL OAuth state nonces, single-use, bound to userId + shopDomain.
-- All Shopify routes Supabase-auth gated except `/auth/callback`.
-
-## Backlog (next iterations)
-**P0**
-- Webhook receiver `/api/shopify/webhooks` with HMAC verify + topic dispatch
-  (orders/create, products/update, app/uninstalled).
-- Shopify-to-Mongo data warehouse (background sync) for fast offline analytics.
-
-**P1**
-- Bulk product editor (CSV upload, AI rewrite-all flow tied into Content Studio).
-- Inventory level mutation endpoints (POST /inventory/adjust) with
-  `inventory_levels/adjust.json`.
-- GraphQL-based analytics tiles (sales over time, top SKUs by revenue).
-
-**P2**
-- Multi-channel: WooCommerce, Amazon, Etsy, TikTok Shop integrations
-  (UI placeholders shipped in onboarding screen).
-- Customer LTV cohort analysis tied into Commerce Intelligence AI agent.
+## Backlog
+- **P1**: Bulk AI rewrite (Content Studio × Commerce Hub).
+- **P1**: Inventory mutation endpoint (`inventory_levels/adjust.json`).
+- **P2**: WooCommerce / Amazon / Etsy / TikTok Shop integrations.
+- **P2**: Background daily sync cron + per-resource webhook backfill.

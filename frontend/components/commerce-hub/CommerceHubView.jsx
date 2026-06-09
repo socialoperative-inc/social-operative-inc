@@ -351,7 +351,7 @@ function DashboardTab({ api, storeId, currency }) {
     { label: 'Products', value: c.products, icon: Package, accent: 'from-emerald-400 to-green-500', testid: 'stat-products' },
     { label: 'Orders', value: c.orders, icon: ShoppingCart, accent: 'from-blue-400 to-cyan-500', testid: 'stat-orders' },
     { label: 'Customers', value: c.customers, icon: Users, accent: 'from-purple-400 to-fuchsia-500', testid: 'stat-customers' },
-    { label: 'Currency', value: shop.currency || currency || 'USD', icon: DollarSign, accent: 'from-amber-400 to-orange-500', testid: 'stat-currency', isText: true },
+    { label: 'Low stock', value: c.lowStock ?? 0, icon: AlertCircle, accent: 'from-amber-400 to-orange-500', testid: 'stat-lowstock' },
   ];
 
   return (
@@ -393,18 +393,25 @@ function DashboardTab({ api, storeId, currency }) {
         <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-5">
           <div className="text-[10px] font-mono tracking-widest text-white/40 uppercase mb-4">Recent orders</div>
           <div className="space-y-2">
-            {(data?.recentOrders || []).slice(0, 5).map(o => (
-              <div key={o.id} data-testid={`recent-order-${o.id}`} className="flex items-center justify-between py-2 border-b border-white/[0.04] last:border-0">
-                <div>
-                  <div className="text-sm text-white">{o.name || `#${o.id}`}</div>
-                  <div className="text-[11px] text-white/40">{o.customer?.first_name ? `${o.customer.first_name} ${o.customer.last_name || ''}` : 'Guest'} · {timeAgo(o.created_at)}</div>
+            {(data?.recentOrders || []).slice(0, 5).map(o => {
+              const total = o.totalPrice ?? o.total_price;
+              const curr = o.currency || currency;
+              const finS = o.financialStatus ?? o.financial_status;
+              const cName = o.customerName || (o.customer ? `${o.customer.first_name || ''} ${o.customer.last_name || ''}`.trim() : '') || o.customerEmail || o.email || 'Guest';
+              const when = o.createdAtShopify ?? o.created_at;
+              return (
+                <div key={o.orderId || o.id} data-testid={`recent-order-${o.orderId || o.id}`} className="flex items-center justify-between py-2 border-b border-white/[0.04] last:border-0">
+                  <div>
+                    <div className="text-sm text-white">{o.name || `#${o.orderId || o.id}`}</div>
+                    <div className="text-[11px] text-white/40">{cName} · {timeAgo(when)}</div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-sm font-medium text-white">{money(total, curr)}</div>
+                    <div className="text-[10px] uppercase tracking-widest text-white/40">{finS}</div>
+                  </div>
                 </div>
-                <div className="text-right">
-                  <div className="text-sm font-medium text-white">{money(o.total_price, o.currency)}</div>
-                  <div className="text-[10px] uppercase tracking-widest text-white/40">{o.financial_status}</div>
-                </div>
-              </div>
-            ))}
+              );
+            })}
             {(!data?.recentOrders || data.recentOrders.length === 0) && (
               <div className="text-sm text-white/40 py-6 text-center">No orders yet</div>
             )}
@@ -432,24 +439,37 @@ function ProductsTab({ api, storeId, currency, toast }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [q, setQ] = useState('');
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [editor, setEditor] = useState(null); // null | 'new' | product object
+  const PAGE = 50;
 
   const load = useCallback(async () => {
     setLoading(true); setError(null);
     try {
-      const d = await api(`/products?storeId=${encodeURIComponent(storeId)}&limit=100`);
+      const d = await api(`/products?storeId=${encodeURIComponent(storeId)}&page=${page}&limit=${PAGE}${q ? `&q=${encodeURIComponent(q)}` : ''}`);
       setItems(d.products || []);
+      setTotal(d.total || 0);
+      setHasMore(d.hasMore || false);
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
-  }, [api, storeId]);
+  }, [api, storeId, page, q]);
 
   useEffect(() => { load(); }, [load]);
 
-  const filtered = useMemo(() => {
-    if (!q.trim()) return items;
-    const s = q.trim().toLowerCase();
-    return items.filter(p => (p.title || '').toLowerCase().includes(s) || (p.vendor || '').toLowerCase().includes(s));
-  }, [items, q]);
+  const filtered = items;
+
+  const resync = async () => {
+    setSyncing(true);
+    try {
+      const r = await api(`/sync/products?storeId=${encodeURIComponent(storeId)}`, { method: 'POST' });
+      toast({ title: 'Products synced', description: `${r?.result?.products || 0} products, ${r?.result?.variants || 0} variants`, variant: 'success' });
+      setPage(1); load();
+    } catch (e) { toast({ title: 'Sync failed', description: e.message, variant: 'error' }); }
+    finally { setSyncing(false); }
+  };
 
   const handleDelete = async (id) => {
     if (!confirm('Delete this product from Shopify? This cannot be undone.')) return;
@@ -481,6 +501,14 @@ function ProductsTab({ api, storeId, currency, toast }) {
           className="px-3 py-2.5 rounded-lg border border-white/10 text-white/70 hover:text-white text-xs flex items-center gap-1.5"
         >
           <RefreshCw className="w-3.5 h-3.5" /> Refresh
+        </button>
+        <button
+          data-testid="resync-products-btn"
+          onClick={resync}
+          disabled={syncing}
+          className="px-3 py-2.5 rounded-lg border border-emerald-500/30 text-emerald-200 hover:bg-emerald-500/10 text-xs flex items-center gap-1.5 disabled:opacity-50"
+        >
+          <RefreshCw className={cn('w-3.5 h-3.5', syncing && 'animate-spin')} /> {syncing ? 'Re-syncing…' : 'Re-sync from Shopify'}
         </button>
         <button
           data-testid="new-product-btn"
@@ -576,6 +604,34 @@ function ProductsTab({ api, storeId, currency, toast }) {
           currency={currency}
         />
       )}
+      <Pagination page={page} total={total} pageSize={PAGE} hasMore={hasMore} onChange={setPage} loading={loading} />
+    </div>
+  );
+}
+
+// ---------------- Pagination ----------------
+function Pagination({ page, total, pageSize, hasMore, onChange, loading }) {
+  if (!total) return null;
+  const start = (page - 1) * pageSize + 1;
+  const end = Math.min(start + pageSize - 1, total);
+  return (
+    <div className="flex items-center justify-between mt-3 text-xs text-white/50" data-testid="pagination">
+      <div>Showing <span className="text-white/80">{start}-{end}</span> of <span className="text-white/80">{fmt(total)}</span></div>
+      <div className="flex items-center gap-2">
+        <button
+          data-testid="page-prev"
+          onClick={() => onChange(Math.max(1, page - 1))}
+          disabled={page <= 1 || loading}
+          className="px-3 py-1.5 rounded-md border border-white/10 hover:bg-white/5 disabled:opacity-40"
+        >Prev</button>
+        <span className="px-2">Page {page}</span>
+        <button
+          data-testid="page-next"
+          onClick={() => onChange(page + 1)}
+          disabled={!hasMore || loading}
+          className="px-3 py-1.5 rounded-md border border-white/10 hover:bg-white/5 disabled:opacity-40"
+        >Next</button>
+      </div>
     </div>
   );
 }
@@ -735,52 +791,97 @@ function Field({ label, children }) {
 // ============================================================================
 // ORDERS TAB
 // ============================================================================
-function OrdersTab({ api, storeId, currency }) {
+function OrdersTab({ api, storeId, currency, toast }) {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [q, setQ] = useState('');
+  const [fin, setFin] = useState('');
+  const [ful, setFul] = useState('');
+  const [syncing, setSyncing] = useState(false);
+  const PAGE = 50;
 
   const load = useCallback(async () => {
     setLoading(true); setError(null);
     try {
-      const d = await api(`/orders?storeId=${encodeURIComponent(storeId)}&limit=100`);
+      const params = new URLSearchParams({ storeId, page: String(page), limit: String(PAGE) });
+      if (q) params.set('q', q);
+      if (fin) params.set('financialStatus', fin);
+      if (ful) params.set('fulfillmentStatus', ful);
+      const d = await api(`/orders?${params.toString()}`);
       setItems(d.orders || []);
+      setTotal(d.total || 0); setHasMore(d.hasMore || false);
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
-  }, [api, storeId]);
+  }, [api, storeId, page, q, fin, ful]);
 
   useEffect(() => { load(); }, [load]);
 
-  if (loading) return <div className="p-12 flex justify-center"><Loader2 className="w-6 h-6 animate-spin text-emerald-400" /></div>;
-  if (error) return <ErrorBlock message={error} onRetry={load} />;
-  if (items.length === 0) return <EmptyState icon={ShoppingCart} text="No orders yet" />;
+  const resync = async () => {
+    setSyncing(true);
+    try {
+      const r = await api(`/sync/orders?storeId=${encodeURIComponent(storeId)}`, { method: 'POST' });
+      toast({ title: 'Orders synced', description: `${r?.result?.orders || 0} orders`, variant: 'success' });
+      setPage(1); load();
+    } catch (e) { toast({ title: 'Sync failed', description: e.message, variant: 'error' }); }
+    finally { setSyncing(false); }
+  };
 
   return (
     <div className="px-8 py-6" data-testid="orders-tab">
-      <div className="rounded-xl border border-white/[0.06] overflow-hidden">
-        <table className="w-full text-sm">
-          <thead className="bg-white/[0.03] border-b border-white/[0.06]">
-            <tr>
-              {['Order', 'Customer', 'Items', 'Total', 'Payment', 'Fulfillment', 'Date'].map(h => (
-                <th key={h} className="text-left px-4 py-3 text-[10px] font-mono tracking-widest text-white/40 uppercase">{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {items.map(o => (
-              <tr key={o.id} data-testid={`order-row-${o.id}`} className="border-b border-white/[0.04] last:border-0 hover:bg-white/[0.02]">
-                <td className="px-4 py-3 text-white">{o.name || `#${o.id}`}</td>
-                <td className="px-4 py-3 text-white/70">{o.customer ? `${o.customer.first_name || ''} ${o.customer.last_name || ''}`.trim() || o.email : (o.email || 'Guest')}</td>
-                <td className="px-4 py-3 text-white/60">{(o.line_items || []).length}</td>
-                <td className="px-4 py-3 text-white font-medium">{money(o.total_price, o.currency || currency)}</td>
-                <td className="px-4 py-3"><Badge text={o.financial_status} variant={o.financial_status === 'paid' ? 'success' : 'warn'} /></td>
-                <td className="px-4 py-3"><Badge text={o.fulfillment_status || 'unfulfilled'} variant={o.fulfillment_status === 'fulfilled' ? 'success' : 'muted'} /></td>
-                <td className="px-4 py-3 text-white/50 text-xs">{new Date(o.created_at).toLocaleDateString()}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div className="flex items-center gap-2 mb-4 flex-wrap">
+        <div className="relative flex-1 min-w-[200px]">
+          <Search className="w-4 h-4 text-white/30 absolute left-3 top-1/2 -translate-y-1/2" />
+          <input data-testid="orders-search" value={q} onChange={(e) => { setQ(e.target.value); setPage(1); }} placeholder="Search by order #, email or customer" className="w-full pl-9 pr-3 py-2.5 rounded-lg bg-black/40 border border-white/10 text-sm text-white placeholder:text-white/30 focus:border-emerald-400/40 outline-none" />
+        </div>
+        <select data-testid="orders-financial-filter" value={fin} onChange={(e) => { setFin(e.target.value); setPage(1); }} className="px-3 py-2.5 rounded-lg bg-black/40 border border-white/10 text-sm text-white outline-none focus:border-emerald-400/40">
+          <option value="">Any payment</option>
+          <option value="paid">Paid</option><option value="pending">Pending</option><option value="refunded">Refunded</option><option value="partially_paid">Partially paid</option><option value="voided">Voided</option>
+        </select>
+        <select data-testid="orders-fulfillment-filter" value={ful} onChange={(e) => { setFul(e.target.value); setPage(1); }} className="px-3 py-2.5 rounded-lg bg-black/40 border border-white/10 text-sm text-white outline-none focus:border-emerald-400/40">
+          <option value="">Any fulfillment</option>
+          <option value="fulfilled">Fulfilled</option><option value="partial">Partial</option><option value="unfulfilled">Unfulfilled</option>
+        </select>
+        <button data-testid="refresh-orders-btn" onClick={load} className="px-3 py-2.5 rounded-lg border border-white/10 text-white/70 hover:text-white text-xs flex items-center gap-1.5"><RefreshCw className="w-3.5 h-3.5" /> Refresh</button>
+        <button data-testid="resync-orders-btn" onClick={resync} disabled={syncing} className="px-3 py-2.5 rounded-lg border border-emerald-500/30 text-emerald-200 hover:bg-emerald-500/10 text-xs flex items-center gap-1.5 disabled:opacity-50"><RefreshCw className={cn('w-3.5 h-3.5', syncing && 'animate-spin')} /> {syncing ? 'Re-syncing…' : 'Re-sync from Shopify'}</button>
       </div>
+
+      {loading ? <div className="p-12 flex justify-center"><Loader2 className="w-6 h-6 animate-spin text-emerald-400" /></div>
+        : error ? <ErrorBlock message={error} onRetry={load} />
+        : items.length === 0 ? <EmptyState icon={ShoppingCart} text="No orders yet — click Re-sync to import" />
+        : (
+          <div className="rounded-xl border border-white/[0.06] overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-white/[0.03] border-b border-white/[0.06]"><tr>{['Order', 'Customer', 'Items', 'Total', 'Payment', 'Fulfillment', 'Date'].map(h => <th key={h} className="text-left px-4 py-3 text-[10px] font-mono tracking-widest text-white/40 uppercase">{h}</th>)}</tr></thead>
+              <tbody>
+                {items.map(o => {
+                  const total = o.totalPrice ?? o.total_price;
+                  const curr = o.currency || currency;
+                  const finS = o.financialStatus ?? o.financial_status;
+                  const fulS = o.fulfillmentStatus ?? o.fulfillment_status;
+                  const cName = o.customerName || (o.customer ? `${o.customer.first_name || ''} ${o.customer.last_name || ''}`.trim() : '') || o.customerEmail || o.email || 'Guest';
+                  const created = o.createdAtShopify ?? o.created_at;
+                  const items = o.lineItemCount ?? (o.line_items || []).length;
+                  return (
+                    <tr key={o.orderId || o.id} data-testid={`order-row-${o.orderId || o.id}`} className="border-b border-white/[0.04] last:border-0 hover:bg-white/[0.02]">
+                      <td className="px-4 py-3 text-white">{o.name || `#${o.orderId || o.id}`}</td>
+                      <td className="px-4 py-3 text-white/70">{cName}</td>
+                      <td className="px-4 py-3 text-white/60">{items}</td>
+                      <td className="px-4 py-3 text-white font-medium">{money(total, curr)}</td>
+                      <td className="px-4 py-3"><Badge text={finS} variant={finS === 'paid' ? 'success' : 'warn'} /></td>
+                      <td className="px-4 py-3"><Badge text={fulS || 'unfulfilled'} variant={fulS === 'fulfilled' ? 'success' : 'muted'} /></td>
+                      <td className="px-4 py-3 text-white/50 text-xs">{created ? new Date(created).toLocaleDateString() : '—'}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      <Pagination page={page} total={total} pageSize={PAGE} hasMore={hasMore} onChange={setPage} loading={loading} />
     </div>
   );
 }
@@ -788,50 +889,83 @@ function OrdersTab({ api, storeId, currency }) {
 // ============================================================================
 // CUSTOMERS TAB
 // ============================================================================
-function CustomersTab({ api, storeId, currency }) {
+function CustomersTab({ api, storeId, currency, toast }) {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [q, setQ] = useState('');
+  const [syncing, setSyncing] = useState(false);
+  const PAGE = 50;
 
   const load = useCallback(async () => {
     setLoading(true); setError(null);
     try {
-      const d = await api(`/customers?storeId=${encodeURIComponent(storeId)}&limit=100`);
+      const params = new URLSearchParams({ storeId, page: String(page), limit: String(PAGE) });
+      if (q) params.set('q', q);
+      const d = await api(`/customers?${params.toString()}`);
       setItems(d.customers || []);
+      setTotal(d.total || 0); setHasMore(d.hasMore || false);
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
-  }, [api, storeId]);
+  }, [api, storeId, page, q]);
 
   useEffect(() => { load(); }, [load]);
 
-  if (loading) return <div className="p-12 flex justify-center"><Loader2 className="w-6 h-6 animate-spin text-emerald-400" /></div>;
-  if (error) return <ErrorBlock message={error} onRetry={load} />;
-  if (items.length === 0) return <EmptyState icon={Users} text="No customers yet" />;
+  const resync = async () => {
+    setSyncing(true);
+    try {
+      const r = await api(`/sync/customers?storeId=${encodeURIComponent(storeId)}`, { method: 'POST' });
+      toast({ title: 'Customers synced', description: `${r?.result?.customers || 0} customers`, variant: 'success' });
+      setPage(1); load();
+    } catch (e) { toast({ title: 'Sync failed', description: e.message, variant: 'error' }); }
+    finally { setSyncing(false); }
+  };
 
   return (
     <div className="px-8 py-6" data-testid="customers-tab">
-      <div className="rounded-xl border border-white/[0.06] overflow-hidden">
-        <table className="w-full text-sm">
-          <thead className="bg-white/[0.03] border-b border-white/[0.06]">
-            <tr>
-              {['Customer', 'Email', 'Orders', 'Spend', 'Joined'].map(h => (
-                <th key={h} className="text-left px-4 py-3 text-[10px] font-mono tracking-widest text-white/40 uppercase">{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {items.map(c => (
-              <tr key={c.id} data-testid={`customer-row-${c.id}`} className="border-b border-white/[0.04] last:border-0 hover:bg-white/[0.02]">
-                <td className="px-4 py-3 text-white">{`${c.first_name || ''} ${c.last_name || ''}`.trim() || '—'}</td>
-                <td className="px-4 py-3 text-white/70 text-xs">{c.email}</td>
-                <td className="px-4 py-3 text-white/60">{c.orders_count || 0}</td>
-                <td className="px-4 py-3 text-white font-medium">{money(c.total_spent, c.currency || currency)}</td>
-                <td className="px-4 py-3 text-white/50 text-xs">{new Date(c.created_at).toLocaleDateString()}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div className="flex items-center gap-2 mb-4 flex-wrap">
+        <div className="relative flex-1 min-w-[200px]">
+          <Search className="w-4 h-4 text-white/30 absolute left-3 top-1/2 -translate-y-1/2" />
+          <input data-testid="customers-search" value={q} onChange={(e) => { setQ(e.target.value); setPage(1); }} placeholder="Search by name, email or phone" className="w-full pl-9 pr-3 py-2.5 rounded-lg bg-black/40 border border-white/10 text-sm text-white placeholder:text-white/30 focus:border-emerald-400/40 outline-none" />
+        </div>
+        <button data-testid="refresh-customers-btn" onClick={load} className="px-3 py-2.5 rounded-lg border border-white/10 text-white/70 hover:text-white text-xs flex items-center gap-1.5"><RefreshCw className="w-3.5 h-3.5" /> Refresh</button>
+        <button data-testid="resync-customers-btn" onClick={resync} disabled={syncing} className="px-3 py-2.5 rounded-lg border border-emerald-500/30 text-emerald-200 hover:bg-emerald-500/10 text-xs flex items-center gap-1.5 disabled:opacity-50"><RefreshCw className={cn('w-3.5 h-3.5', syncing && 'animate-spin')} /> {syncing ? 'Re-syncing…' : 'Re-sync from Shopify'}</button>
       </div>
+
+      {loading ? <div className="p-12 flex justify-center"><Loader2 className="w-6 h-6 animate-spin text-emerald-400" /></div>
+        : error ? <ErrorBlock message={error} onRetry={load} />
+        : items.length === 0 ? <EmptyState icon={Users} text="No customers yet — click Re-sync to import" />
+        : (
+          <div className="rounded-xl border border-white/[0.06] overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-white/[0.03] border-b border-white/[0.06]"><tr>{['Customer', 'Email', 'Phone', 'Orders', 'Spend', 'Tags', 'Joined'].map(h => <th key={h} className="text-left px-4 py-3 text-[10px] font-mono tracking-widest text-white/40 uppercase">{h}</th>)}</tr></thead>
+              <tbody>
+                {items.map(c => {
+                  const first = c.firstName ?? c.first_name;
+                  const last = c.lastName ?? c.last_name;
+                  const orders = c.ordersCount ?? c.orders_count;
+                  const spent = c.totalSpent ?? c.total_spent;
+                  const created = c.createdAtShopify ?? c.created_at;
+                  return (
+                    <tr key={c.customerId || c.id} data-testid={`customer-row-${c.customerId || c.id}`} className="border-b border-white/[0.04] last:border-0 hover:bg-white/[0.02]">
+                      <td className="px-4 py-3 text-white">{`${first || ''} ${last || ''}`.trim() || '—'}</td>
+                      <td className="px-4 py-3 text-white/70 text-xs">{c.email || '—'}</td>
+                      <td className="px-4 py-3 text-white/60 text-xs">{c.phone || '—'}</td>
+                      <td className="px-4 py-3 text-white/60">{orders || 0}</td>
+                      <td className="px-4 py-3 text-white font-medium">{money(spent, c.currency || currency)}</td>
+                      <td className="px-4 py-3 text-white/50 text-xs truncate max-w-[160px]">{c.tags || '—'}</td>
+                      <td className="px-4 py-3 text-white/50 text-xs">{created ? new Date(created).toLocaleDateString() : '—'}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      <Pagination page={page} total={total} pageSize={PAGE} hasMore={hasMore} onChange={setPage} loading={loading} />
     </div>
   );
 }
@@ -886,58 +1020,76 @@ function CollectionsTab({ api, storeId }) {
 // ============================================================================
 // INVENTORY TAB
 // ============================================================================
-function InventoryTab({ api, storeId, currency }) {
+function InventoryTab({ api, storeId, currency, toast }) {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [lowOnly, setLowOnly] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const PAGE = 100;
 
   const load = useCallback(async () => {
     setLoading(true); setError(null);
     try {
-      const d = await api(`/inventory?storeId=${encodeURIComponent(storeId)}&limit=100`);
+      const params = new URLSearchParams({ storeId, page: String(page), limit: String(PAGE) });
+      if (lowOnly) params.set('lowStock', '1');
+      const d = await api(`/inventory?${params.toString()}`);
       setItems(d.inventory || []);
+      setTotal(d.total || 0); setHasMore(d.hasMore || false);
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
-  }, [api, storeId]);
+  }, [api, storeId, page, lowOnly]);
 
   useEffect(() => { load(); }, [load]);
 
-  if (loading) return <div className="p-12 flex justify-center"><Loader2 className="w-6 h-6 animate-spin text-emerald-400" /></div>;
-  if (error) return <ErrorBlock message={error} onRetry={load} />;
-  if (items.length === 0) return <EmptyState icon={Package} text="No inventory items" />;
+  const resync = async () => {
+    setSyncing(true);
+    try {
+      const r = await api(`/sync/inventory?storeId=${encodeURIComponent(storeId)}`, { method: 'POST' });
+      toast({ title: 'Inventory synced', description: `${r?.result?.levels || 0} levels`, variant: 'success' });
+      setPage(1); load();
+    } catch (e) { toast({ title: 'Sync failed', description: e.message, variant: 'error' }); }
+    finally { setSyncing(false); }
+  };
 
   return (
     <div className="px-8 py-6" data-testid="inventory-tab">
-      <div className="rounded-xl border border-white/[0.06] overflow-hidden">
-        <table className="w-full text-sm">
-          <thead className="bg-white/[0.03] border-b border-white/[0.06]">
-            <tr>
-              {['Product', 'Variant', 'SKU', 'Price', 'On hand', 'Policy'].map(h => (
-                <th key={h} className="text-left px-4 py-3 text-[10px] font-mono tracking-widest text-white/40 uppercase">{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {items.map(it => (
-              <tr key={it.variantId} data-testid={`inventory-row-${it.variantId}`} className="border-b border-white/[0.04] last:border-0 hover:bg-white/[0.02]">
-                <td className="px-4 py-3">
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-md bg-black/40 border border-white/10 overflow-hidden flex items-center justify-center shrink-0">
-                      {it.productImage ? <img src={it.productImage} alt="" className="w-full h-full object-cover" /> : <ImageIcon className="w-3 h-3 text-white/30" />}
-                    </div>
-                    <span className="text-white truncate max-w-xs">{it.productTitle}</span>
-                  </div>
-                </td>
-                <td className="px-4 py-3 text-white/70 text-xs">{it.variantTitle}</td>
-                <td className="px-4 py-3 text-white/50 text-xs font-mono">{it.sku || '—'}</td>
-                <td className="px-4 py-3 text-white/70">{money(it.price, currency)}</td>
-                <td className="px-4 py-3"><span className={cn('font-medium', (it.inventoryQuantity ?? 0) <= 5 ? 'text-rose-300' : (it.inventoryQuantity ?? 0) <= 20 ? 'text-amber-300' : 'text-emerald-300')}>{fmt(it.inventoryQuantity ?? 0)}</span></td>
-                <td className="px-4 py-3 text-white/50 text-xs">{it.inventoryPolicy || 'deny'}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div className="flex items-center gap-2 mb-4 flex-wrap">
+        <button data-testid="inventory-low-toggle" onClick={() => { setLowOnly(!lowOnly); setPage(1); }} className={cn('px-3 py-2.5 rounded-lg border text-xs flex items-center gap-1.5', lowOnly ? 'bg-amber-500/10 border-amber-500/30 text-amber-200' : 'border-white/10 text-white/70 hover:text-white')}><AlertCircle className="w-3.5 h-3.5" /> {lowOnly ? 'Showing low stock only' : 'Show low stock only'}</button>
+        <div className="flex-1" />
+        <button data-testid="refresh-inventory-btn" onClick={load} className="px-3 py-2.5 rounded-lg border border-white/10 text-white/70 hover:text-white text-xs flex items-center gap-1.5"><RefreshCw className="w-3.5 h-3.5" /> Refresh</button>
+        <button data-testid="resync-inventory-btn" onClick={resync} disabled={syncing} className="px-3 py-2.5 rounded-lg border border-emerald-500/30 text-emerald-200 hover:bg-emerald-500/10 text-xs flex items-center gap-1.5 disabled:opacity-50"><RefreshCw className={cn('w-3.5 h-3.5', syncing && 'animate-spin')} /> {syncing ? 'Re-syncing…' : 'Re-sync from Shopify'}</button>
       </div>
+
+      {loading ? <div className="p-12 flex justify-center"><Loader2 className="w-6 h-6 animate-spin text-emerald-400" /></div>
+        : error ? <ErrorBlock message={error} onRetry={load} />
+        : items.length === 0 ? <EmptyState icon={Package} text={lowOnly ? 'No low stock items 🎉' : 'No inventory items'} />
+        : (
+          <div className="rounded-xl border border-white/[0.06] overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-white/[0.03] border-b border-white/[0.06]"><tr>{['Product', 'Variant', 'SKU', 'Price', 'On hand', 'Policy'].map(h => <th key={h} className="text-left px-4 py-3 text-[10px] font-mono tracking-widest text-white/40 uppercase">{h}</th>)}</tr></thead>
+              <tbody>
+                {items.map(it => {
+                  const qty = it.available ?? it.inventoryQuantity ?? 0;
+                  return (
+                    <tr key={`${it.variantId || it.inventoryItemId}-${it.locationId || ''}`} data-testid={`inventory-row-${it.variantId || it.inventoryItemId}`} className="border-b border-white/[0.04] last:border-0 hover:bg-white/[0.02]">
+                      <td className="px-4 py-3"><div className="flex items-center gap-3"><div className="w-8 h-8 rounded-md bg-black/40 border border-white/10 overflow-hidden flex items-center justify-center shrink-0">{it.productImage ? <img src={it.productImage} alt="" className="w-full h-full object-cover" /> : <ImageIcon className="w-3 h-3 text-white/30" />}</div><span className="text-white truncate max-w-xs">{it.productTitle}</span></div></td>
+                      <td className="px-4 py-3 text-white/70 text-xs">{it.variantTitle || '—'}</td>
+                      <td className="px-4 py-3 text-white/50 text-xs font-mono">{it.sku || '—'}</td>
+                      <td className="px-4 py-3 text-white/70">{it.price ? money(it.price, currency) : '—'}</td>
+                      <td className="px-4 py-3"><span className={cn('font-medium', qty <= 5 ? 'text-rose-300' : qty <= 20 ? 'text-amber-300' : 'text-emerald-300')}>{fmt(qty)}</span></td>
+                      <td className="px-4 py-3 text-white/50 text-xs">{it.inventoryPolicy || 'deny'}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      <Pagination page={page} total={total} pageSize={PAGE} hasMore={hasMore} onChange={setPage} loading={loading} />
     </div>
   );
 }
@@ -1110,10 +1262,10 @@ export default function CommerceHubView({ apiFetch, toast }) {
         >
           {tab === 'dashboard' && <DashboardTab api={api} storeId={activeStore.id} currency={currency} />}
           {tab === 'products' && <ProductsTab api={api} storeId={activeStore.id} currency={currency} toast={toast} />}
-          {tab === 'orders' && <OrdersTab api={api} storeId={activeStore.id} currency={currency} />}
-          {tab === 'customers' && <CustomersTab api={api} storeId={activeStore.id} currency={currency} />}
+          {tab === 'orders' && <OrdersTab api={api} storeId={activeStore.id} currency={currency} toast={toast} />}
+          {tab === 'customers' && <CustomersTab api={api} storeId={activeStore.id} currency={currency} toast={toast} />}
           {tab === 'collections' && <CollectionsTab api={api} storeId={activeStore.id} />}
-          {tab === 'inventory' && <InventoryTab api={api} storeId={activeStore.id} currency={currency} />}
+          {tab === 'inventory' && <InventoryTab api={api} storeId={activeStore.id} currency={currency} toast={toast} />}
         </motion.div>
       </AnimatePresence>
     </div>
