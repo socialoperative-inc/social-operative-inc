@@ -6,7 +6,7 @@ import {
   Store, Package, ShoppingCart, Users, Layers, RefreshCw, Plus, Search,
   Trash2, Edit3, ExternalLink, Check, X, Loader2, AlertCircle, Image as ImageIcon,
   Zap, Link2, Unlink, ArrowUpRight, TrendingUp, DollarSign, ShoppingBag,
-  CheckCircle2, Circle, ChevronRight, Lock, Sparkles
+  CheckCircle2, Circle, ChevronRight, Lock, Sparkles, Wand2
 } from 'lucide-react';
 
 const cn = (...a) => a.filter(Boolean).join(' ');
@@ -444,6 +444,8 @@ function ProductsTab({ api, storeId, currency, toast }) {
   const [hasMore, setHasMore] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [editor, setEditor] = useState(null); // null | 'new' | product object
+  const [rewriteFor, setRewriteFor] = useState(null); // product object for single rewrite
+  const [bulkOpen, setBulkOpen] = useState(false);
   const PAGE = 50;
 
   const load = useCallback(async () => {
@@ -471,10 +473,11 @@ function ProductsTab({ api, storeId, currency, toast }) {
     finally { setSyncing(false); }
   };
 
-  const handleDelete = async (id) => {
+  const handleDelete = async (p) => {
+    const shopifyId = p.productId || p.id;
     if (!confirm('Delete this product from Shopify? This cannot be undone.')) return;
     try {
-      await api(`/products/${id}?storeId=${encodeURIComponent(storeId)}`, { method: 'DELETE' });
+      await api(`/products/${shopifyId}?storeId=${encodeURIComponent(storeId)}`, { method: 'DELETE' });
       toast({ title: 'Product deleted', variant: 'success' });
       load();
     } catch (e) {
@@ -509,6 +512,13 @@ function ProductsTab({ api, storeId, currency, toast }) {
           className="px-3 py-2.5 rounded-lg border border-emerald-500/30 text-emerald-200 hover:bg-emerald-500/10 text-xs flex items-center gap-1.5 disabled:opacity-50"
         >
           <RefreshCw className={cn('w-3.5 h-3.5', syncing && 'animate-spin')} /> {syncing ? 'Re-syncing…' : 'Re-sync from Shopify'}
+        </button>
+        <button
+          data-testid="ai-rewrite-all-btn"
+          onClick={() => setBulkOpen(true)}
+          className="px-3 py-2.5 rounded-lg bg-gradient-to-br from-fuchsia-500 to-purple-600 text-white text-xs font-semibold flex items-center gap-1.5 hover:shadow-lg hover:shadow-fuchsia-500/30"
+        >
+          <Wand2 className="w-3.5 h-3.5" /> AI rewrite catalog
         </button>
         <button
           data-testid="new-product-btn"
@@ -569,6 +579,14 @@ function ProductsTab({ api, storeId, currency, toast }) {
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-1 justify-end">
                           <button
+                            data-testid={`ai-rewrite-${p.productId || p.id}`}
+                            onClick={() => setRewriteFor(p)}
+                            className="p-1.5 rounded-md hover:bg-fuchsia-500/10 text-white/60 hover:text-fuchsia-300"
+                            title="AI rewrite copy"
+                          >
+                            <Wand2 className="w-4 h-4" />
+                          </button>
+                          <button
                             data-testid={`edit-product-${p.id}`}
                             onClick={() => setEditor(p)}
                             className="p-1.5 rounded-md hover:bg-white/5 text-white/60 hover:text-white"
@@ -576,8 +594,8 @@ function ProductsTab({ api, storeId, currency, toast }) {
                             <Edit3 className="w-4 h-4" />
                           </button>
                           <button
-                            data-testid={`delete-product-${p.id}`}
-                            onClick={() => handleDelete(p.id)}
+                            data-testid={`delete-product-${p.productId || p.id}`}
+                            onClick={() => handleDelete(p)}
                             className="p-1.5 rounded-md hover:bg-rose-500/10 text-white/60 hover:text-rose-300"
                           >
                             <Trash2 className="w-4 h-4" />
@@ -604,7 +622,291 @@ function ProductsTab({ api, storeId, currency, toast }) {
           currency={currency}
         />
       )}
+      {rewriteFor && (
+        <AIRewriteModal
+          api={api}
+          storeId={storeId}
+          product={rewriteFor}
+          onClose={() => setRewriteFor(null)}
+          onApplied={() => { setRewriteFor(null); load(); }}
+          toast={toast}
+        />
+      )}
+      {bulkOpen && (
+        <BulkRewriteModal
+          api={api}
+          storeId={storeId}
+          products={items}
+          onClose={() => setBulkOpen(false)}
+          onDone={() => { setBulkOpen(false); load(); }}
+          toast={toast}
+        />
+      )}
       <Pagination page={page} total={total} pageSize={PAGE} hasMore={hasMore} onChange={setPage} loading={loading} />
+    </div>
+  );
+}
+
+// ============================================================================
+// AI REWRITE MODAL (single product)
+// ============================================================================
+function AIRewriteModal({ api, storeId, product, onClose, onApplied, toast }) {
+  const productId = product.productId || product.id;
+  const [tone, setTone] = useState('premium, confident, benefit-led');
+  const [brandVoice, setBrandVoice] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [result, setResult] = useState(null);
+
+  const preview = async () => {
+    setLoading(true); setResult(null);
+    try {
+      const d = await api(`/ai/rewrite/${productId}?storeId=${encodeURIComponent(storeId)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tone, brandVoice }),
+      });
+      setResult(d);
+    } catch (e) {
+      toast({ title: 'AI rewrite failed', description: e.message, variant: 'error' });
+    } finally { setLoading(false); }
+  };
+
+  const apply = async () => {
+    setApplying(true);
+    try {
+      await api(`/ai/rewrite/${productId}?storeId=${encodeURIComponent(storeId)}&apply=1`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tone, brandVoice }),
+      });
+      toast({ title: 'Pushed to Shopify', variant: 'success' });
+      onApplied();
+    } catch (e) {
+      toast({ title: 'Apply failed', description: e.message, variant: 'error' });
+    } finally { setApplying(false); }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" onClick={onClose} data-testid="ai-rewrite-modal">
+      <motion.div initial={{ opacity: 0, scale: 0.96 }} animate={{ opacity: 1, scale: 1 }} onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-4xl max-h-[90vh] overflow-y-auto rounded-2xl border border-fuchsia-500/20 bg-[#0a0a0f] shadow-2xl">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-white/[0.06] sticky top-0 bg-[#0a0a0f] z-10">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-fuchsia-500 to-purple-600 flex items-center justify-center"><Wand2 className="w-4 h-4 text-white" /></div>
+            <div>
+              <div className="text-[10px] font-mono tracking-widest text-fuchsia-300 uppercase">AI rewrite</div>
+              <div className="text-lg font-semibold text-white truncate max-w-md">{product.title}</div>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-2 rounded-lg hover:bg-white/5" data-testid="ai-rewrite-close"><X className="w-5 h-5 text-white/60" /></button>
+        </div>
+
+        <div className="p-6 space-y-5">
+          <div className="grid grid-cols-2 gap-4">
+            <label className="block">
+              <div className="text-[10px] font-mono tracking-widest text-white/40 uppercase mb-1.5">Tone</div>
+              <input data-testid="ai-tone" value={tone} onChange={(e) => setTone(e.target.value)}
+                className="w-full px-3 py-2.5 rounded-lg bg-black/40 border border-white/10 text-sm text-white outline-none focus:border-fuchsia-400/50" />
+            </label>
+            <label className="block">
+              <div className="text-[10px] font-mono tracking-widest text-white/40 uppercase mb-1.5">Brand voice (optional)</div>
+              <input data-testid="ai-brand-voice" value={brandVoice} onChange={(e) => setBrandVoice(e.target.value)}
+                placeholder="e.g. minimalist, science-led, never use the word ‘amazing’"
+                className="w-full px-3 py-2.5 rounded-lg bg-black/40 border border-white/10 text-sm text-white placeholder:text-white/30 outline-none focus:border-fuchsia-400/50" />
+            </label>
+          </div>
+
+          <button
+            data-testid="ai-preview-btn"
+            onClick={preview}
+            disabled={loading}
+            className="w-full py-3 rounded-lg bg-gradient-to-br from-fuchsia-500 to-purple-600 text-white font-semibold text-sm flex items-center justify-center gap-2 disabled:opacity-50"
+          >
+            {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
+            {loading ? 'Generating…' : (result ? 'Re-generate' : 'Generate preview')}
+          </button>
+
+          {result?.preview && (
+            <div className="grid md:grid-cols-2 gap-4" data-testid="ai-preview">
+              <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
+                <div className="text-[10px] font-mono tracking-widest text-white/40 uppercase mb-2">Before</div>
+                <div className="text-sm font-medium text-white mb-2">{result.preview.before.title}</div>
+                <div className="text-xs text-white/60 max-h-64 overflow-y-auto" dangerouslySetInnerHTML={{ __html: result.preview.before.body_html || '<em class="text-white/30">(empty)</em>' }} />
+              </div>
+              <div className="rounded-xl border border-fuchsia-500/20 bg-fuchsia-500/5 p-4">
+                <div className="text-[10px] font-mono tracking-widest text-fuchsia-300 uppercase mb-2">After</div>
+                <div className="text-sm font-medium text-white mb-2">{result.preview.after.title}</div>
+                <div className="text-xs text-white/70 max-h-64 overflow-y-auto" dangerouslySetInnerHTML={{ __html: result.preview.after.body_html }} />
+                {result.preview.after.rationale && (
+                  <div className="mt-3 text-[11px] text-fuchsia-200/70 border-t border-fuchsia-500/10 pt-3">
+                    <span className="font-mono tracking-widest uppercase text-[9px] text-fuchsia-300 mr-2">Why</span>
+                    {result.preview.after.rationale}
+                  </div>
+                )}
+                <div className="grid grid-cols-2 gap-2 mt-3 text-[11px]">
+                  <div><span className="text-white/40">SEO title:</span> <span className="text-white/80">{result.preview.after.seo_title || '—'}</span></div>
+                  <div><span className="text-white/40">Model:</span> <span className="text-white/80">{result.preview.after.model}</span></div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 px-6 py-4 border-t border-white/[0.06] sticky bottom-0 bg-[#0a0a0f]">
+          <button onClick={onClose} className="px-4 py-2 rounded-lg text-white/60 hover:text-white text-sm">Cancel</button>
+          <button
+            data-testid="ai-apply-btn"
+            onClick={apply}
+            disabled={!result || applying}
+            className="px-5 py-2 rounded-lg bg-gradient-to-br from-emerald-400 to-green-500 text-emerald-950 font-semibold text-sm flex items-center gap-2 disabled:opacity-50"
+          >
+            {applying ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
+            {applying ? 'Pushing…' : 'Push to Shopify'}
+          </button>
+        </div>
+      </motion.div>
+    </div>
+  );
+}
+
+// ============================================================================
+// BULK REWRITE MODAL (catalog)
+// ============================================================================
+function BulkRewriteModal({ api, storeId, products, onClose, onDone, toast }) {
+  const [tone, setTone] = useState('premium, confident, benefit-led');
+  const [brandVoice, setBrandVoice] = useState('');
+  const [running, setRunning] = useState(false);
+  const [cancelled, setCancelled] = useState(false);
+  const [progress, setProgress] = useState({ done: 0, ok: 0, failed: 0, current: '' });
+  const [errors, setErrors] = useState([]);
+
+  const start = async () => {
+    setRunning(true); setCancelled(false);
+    setProgress({ done: 0, ok: 0, failed: 0, current: '' });
+    setErrors([]);
+    const list = products || [];
+    let i = 0;
+    for (const p of list) {
+      if (cancelled) break;
+      const productId = p.productId || p.id;
+      const title = p.title;
+      setProgress(prev => ({ ...prev, current: title }));
+      try {
+        await api(`/ai/rewrite/${productId}?storeId=${encodeURIComponent(storeId)}&apply=1`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tone, brandVoice }),
+        });
+        i++;
+        setProgress({ done: i, ok: i - errors.length, failed: errors.length, current: title });
+      } catch (e) {
+        const errMsg = `${title}: ${e.message}`;
+        setErrors(prev => [...prev, errMsg]);
+        i++;
+        setProgress(prev => ({ done: i, ok: prev.ok, failed: prev.failed + 1, current: title }));
+      }
+    }
+    setRunning(false);
+    toast({ title: 'Catalog rewrite finished', description: `${i - errors.length}/${list.length} succeeded`, variant: errors.length ? 'warn' : 'success' });
+  };
+
+  const pct = products?.length ? Math.round((progress.done / products.length) * 100) : 0;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" onClick={!running ? onClose : undefined} data-testid="bulk-rewrite-modal">
+      <motion.div initial={{ opacity: 0, scale: 0.96 }} animate={{ opacity: 1, scale: 1 }} onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-2xl rounded-2xl border border-fuchsia-500/20 bg-[#0a0a0f] shadow-2xl">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-white/[0.06]">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-fuchsia-500 to-purple-600 flex items-center justify-center"><Wand2 className="w-4 h-4 text-white" /></div>
+            <div>
+              <div className="text-[10px] font-mono tracking-widest text-fuchsia-300 uppercase">Bulk AI rewrite</div>
+              <div className="text-lg font-semibold text-white">{products?.length || 0} products on this page</div>
+            </div>
+          </div>
+          <button onClick={onClose} disabled={running} className="p-2 rounded-lg hover:bg-white/5 disabled:opacity-30" data-testid="bulk-rewrite-close"><X className="w-5 h-5 text-white/60" /></button>
+        </div>
+
+        <div className="p-6 space-y-4">
+          <div className="text-sm text-white/60">
+            This will rewrite the title, description, SEO title and SEO description of every product currently shown, and push the changes back to Shopify. It runs one product at a time so you can stop anytime. Affects this page only — paginate or filter first to scope.
+          </div>
+
+          {!running && progress.done === 0 && (
+            <div className="grid grid-cols-2 gap-4">
+              <label className="block">
+                <div className="text-[10px] font-mono tracking-widest text-white/40 uppercase mb-1.5">Tone</div>
+                <input data-testid="bulk-tone" value={tone} onChange={(e) => setTone(e.target.value)}
+                  className="w-full px-3 py-2.5 rounded-lg bg-black/40 border border-white/10 text-sm text-white outline-none focus:border-fuchsia-400/50" />
+              </label>
+              <label className="block">
+                <div className="text-[10px] font-mono tracking-widest text-white/40 uppercase mb-1.5">Brand voice (optional)</div>
+                <input data-testid="bulk-brand-voice" value={brandVoice} onChange={(e) => setBrandVoice(e.target.value)}
+                  className="w-full px-3 py-2.5 rounded-lg bg-black/40 border border-white/10 text-sm text-white outline-none focus:border-fuchsia-400/50" />
+              </label>
+            </div>
+          )}
+
+          {(running || progress.done > 0) && (
+            <div data-testid="bulk-progress">
+              <div className="flex items-center justify-between text-xs text-white/60 mb-2">
+                <div>Progress: <span className="text-white">{progress.done}/{products?.length || 0}</span></div>
+                <div className="font-mono tracking-widest uppercase text-[10px] text-white/40">{pct}%</div>
+              </div>
+              <div className="h-2 rounded-full bg-white/5 overflow-hidden">
+                <div className="h-full bg-gradient-to-r from-fuchsia-500 to-purple-600 transition-all" style={{ width: `${pct}%` }} />
+              </div>
+              <div className="flex items-center gap-4 mt-3 text-xs">
+                <div><span className="text-emerald-300">{progress.ok}</span> <span className="text-white/40">succeeded</span></div>
+                <div><span className="text-rose-300">{progress.failed}</span> <span className="text-white/40">failed</span></div>
+              </div>
+              {progress.current && running && (
+                <div className="text-[11px] text-white/40 mt-2 truncate">Now: {progress.current}</div>
+              )}
+              {errors.length > 0 && (
+                <div className="mt-3 max-h-32 overflow-y-auto rounded-lg border border-rose-500/10 bg-rose-500/5 p-3 text-[11px] text-rose-200 space-y-1">
+                  {errors.slice(-8).map((e, i) => <div key={i}>{e}</div>)}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 px-6 py-4 border-t border-white/[0.06]">
+          {!running && progress.done === 0 && (
+            <>
+              <button onClick={onClose} className="px-4 py-2 rounded-lg text-white/60 hover:text-white text-sm">Cancel</button>
+              <button
+                data-testid="bulk-start-btn"
+                onClick={start}
+                disabled={!products?.length}
+                className="px-5 py-2 rounded-lg bg-gradient-to-br from-fuchsia-500 to-purple-600 text-white font-semibold text-sm flex items-center gap-2 disabled:opacity-50"
+              >
+                <Wand2 className="w-4 h-4" /> Rewrite {products?.length || 0} products
+              </button>
+            </>
+          )}
+          {running && (
+            <button
+              data-testid="bulk-cancel-btn"
+              onClick={() => setCancelled(true)}
+              className="px-5 py-2 rounded-lg border border-rose-500/30 text-rose-300 hover:bg-rose-500/10 text-sm flex items-center gap-2"
+            >
+              <X className="w-4 h-4" /> Stop after current
+            </button>
+          )}
+          {!running && progress.done > 0 && (
+            <button
+              data-testid="bulk-done-btn"
+              onClick={onDone}
+              className="px-5 py-2 rounded-lg bg-gradient-to-br from-emerald-400 to-green-500 text-emerald-950 font-semibold text-sm flex items-center gap-2"
+            >
+              <Check className="w-4 h-4" /> Done
+            </button>
+          )}
+        </div>
+      </motion.div>
     </div>
   );
 }
@@ -672,7 +974,7 @@ function ProductEditor({ api, storeId, product, onClose, onSaved, toast, currenc
         status: form.status,
         tags: form.tags,
         variants: [{
-          ...(v.id ? { id: v.id } : {}),
+          ...(v.variantId ? { id: Number(v.variantId) } : (v.id ? { id: v.id } : {})),
           price: form.price || undefined,
           compare_at_price: form.compare_at_price || undefined,
           sku: form.sku || undefined,
@@ -688,7 +990,8 @@ function ProductEditor({ api, storeId, product, onClose, onSaved, toast, currenc
           body: JSON.stringify({ product: payload }),
         });
       } else {
-        saved = await api(`/products/${product.id}?storeId=${encodeURIComponent(storeId)}`, {
+        const shopifyId = product.productId || product.id;
+        saved = await api(`/products/${shopifyId}?storeId=${encodeURIComponent(storeId)}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ product: payload }),

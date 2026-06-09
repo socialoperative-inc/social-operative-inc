@@ -46,6 +46,7 @@ import {
 } from '../../../../lib/shopify/client';
 import { syncAll, syncProducts, syncOrders, syncCustomers, syncInventory, logSync } from '../../../../lib/shopify/sync';
 import { registerWebhooks, webhookAddress } from '../../../../lib/shopify/webhooks';
+import { rewriteProductCopy } from '../../../../lib/shopify/ai';
 
 const safeStr = (v) => (typeof v === 'string' ? v : '');
 const isLocalhostUri = (u) => {
@@ -838,6 +839,89 @@ async function handle(request, { params }) {
         }));
         return NextResponse.json({ inventory, page, limit, total, hasMore: page * limit < total, source: 'variants' });
       } catch (e) { return err(safeStr(e?.message), e?.status || 502); }
+    }
+
+    // ========== AI REWRITE ==========
+    // POST /ai/rewrite/:productId?storeId=&apply=1
+    if (pathArr[0] === 'ai' && pathArr[1] === 'rewrite' && pathArr[2] && method === 'POST') {
+      const u = new URL(request.url);
+      const storeId = safeStr(u.searchParams.get('storeId'));
+      const apply = u.searchParams.get('apply') === '1';
+      const productId = pathArr[2];
+      if (!storeId) return err('storeId required', 400);
+      const body = await readJsonBody(request);
+      const tone = safeStr(body?.tone);
+      const brandVoice = safeStr(body?.brandVoice);
+      const model = safeStr(body?.model);
+
+      const db = await getDb();
+      if (!db) return err('Database unavailable', 503);
+      try {
+        const { store, accessToken } = await resolveStore(db, user.id, storeId);
+        // Always pull fresh product from Shopify so we have variants/desc
+        const live = await restGet({
+          shopDomain: store.shopDomain,
+          accessToken,
+          path: `/products/${encodeURIComponent(productId)}.json`,
+        });
+        const sourceProduct = live?.product;
+        if (!sourceProduct) return err('Product not found in Shopify', 404);
+
+        const ai = await rewriteProductCopy({ product: sourceProduct, tone, brandVoice, model });
+
+        let updated = null;
+        if (apply) {
+          const upd = await restWrite({
+            shopDomain: store.shopDomain,
+            accessToken,
+            method: 'PUT',
+            path: `/products/${encodeURIComponent(productId)}.json`,
+            body: {
+              product: {
+                id: Number(productId),
+                title: ai.title,
+                body_html: ai.body_html,
+                metafields_global_title_tag: ai.seo_title || undefined,
+                metafields_global_description_tag: ai.seo_description || undefined,
+              },
+            },
+          });
+          updated = upd?.product || null;
+          try { await syncProductIntoMongo(db, store, updated); } catch (_) {}
+        }
+
+        await logSync(db, {
+          resource: 'ai_rewrite',
+          stage: apply ? 'apply' : 'preview',
+          status: 'ok',
+          storeId: store.id, userId: user.id,
+          productId,
+          model: ai.model,
+        });
+
+        return NextResponse.json({
+          ok: true,
+          preview: {
+            before: {
+              title: safeStr(sourceProduct.title),
+              body_html: safeStr(sourceProduct.body_html),
+            },
+            after: ai,
+          },
+          applied: !!apply,
+          product: updated,
+        });
+      } catch (e) {
+        try {
+          const db2 = await getDb();
+          if (db2) await logSync(db2, {
+            resource: 'ai_rewrite', stage: 'error', status: 'error',
+            storeId, userId: user.id, productId,
+            error: safeStr(e?.message),
+          });
+        } catch (_) {}
+        return err(safeStr(e?.message), e?.status || 502);
+      }
     }
 
     return err(`Route not found: /api/shopify${path}`, 404);
