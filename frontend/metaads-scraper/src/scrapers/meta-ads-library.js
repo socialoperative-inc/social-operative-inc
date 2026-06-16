@@ -144,7 +144,7 @@ async function extractAds(page, hardLimit) {
           const match = style.match(/url\(['"]?([^'"()]+)['"]?\)/);
           return match && match[1] ? match[1] : null;
         })
-        .filter(s => s && /scontent|fbcdn|cdninstagram/i.test(s))
+        .filter(s => s)
         .map(cleanMediaUrl);
 
       // Strategy 3: Picture/source elements (for responsive images)
@@ -153,13 +153,13 @@ async function extractAds(page, hardLimit) {
           const srcset = source.getAttribute('srcset') || '';
           return srcset.split(',').map(s => s.trim().split(' ')[0]);
         })
-        .filter(s => s && /scontent|fbcdn/i.test(s))
+        .filter(s => s)
         .map(cleanMediaUrl);
 
       // Strategy 4: Data attributes commonly used by Meta
       const dataImages = Array.from(card.querySelectorAll('[data-src], [data-img], [data-image-url]'))
         .map(el => el.getAttribute('data-src') || el.getAttribute('data-img') || el.getAttribute('data-image-url'))
-        .filter(s => s && /scontent|fbcdn/i.test(s))
+        .filter(s => s)
         .map(cleanMediaUrl);
 
       // Merge all images and deduplicate
