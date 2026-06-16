@@ -238,11 +238,15 @@ async function extractAds(page, hardLimit) {
         headline,
         cta,
         landingUrl,
-        imageUrl: uniqueImages[0] || '',
+        imageUrl: uniqueImages[0] || videoPoster || '',
         imageUrls: uniqueImages.slice(0, 6),
         videoUrl: videoSrc,
         videoPoster: videoPoster,
-        mediaType: videoSrc ? 'video' : uniqueImages.length ? 'image' : 'unknown',
+        mediaType: (videoSrc || videoPoster)
+  ? 'video'
+  : uniqueImages.length
+  ? 'image'
+  : 'unknown',
         platforms,
         isActive,
         startDate,
