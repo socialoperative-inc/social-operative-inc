@@ -2,7 +2,7 @@
 // Heavy AI analysis (hooks, viral score, emotional triggers) lives on the Vercel
 // frontend backend via OpenRouter — keeping concerns separated.
 
-const { scoreEcommerceLikelihood, classifyBrandType, isEnterpriseDomain, detectShopify } = require('./ecommerce-filter');
+const { scoreEcommerceLikelihood, classifyBrandType, isEnterpriseDomain, isEnterpriseBrand, detectShopify } = require('./ecommerce-filter');
 
 const CTA_BUTTONS = [
   'Shop Now', 'Learn More', 'Sign Up', 'Get Offer', 'Order Now', 'Download',
@@ -165,7 +165,7 @@ function enrichAd(ad) {
       brandType,
       isUgc,
       isShopify: detectShopify(ad.landingUrl),
-      isEnterprise: isEnterpriseDomain(ad.landingUrl),
+      isEnterprise: isEnterpriseBrand(ad),
       wordCount: adCopy.split(/\s+/).filter(Boolean).length,
       hasVideo: ad.mediaType === 'video',
       hasCarousel: (ad.imageUrls || []).length > 1,
