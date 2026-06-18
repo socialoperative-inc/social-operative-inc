@@ -14,7 +14,7 @@ function buildUrl({ query, country = 'US', mediaType = 'all', adType = 'all' }) 
   const params = new URLSearchParams({
     active_status: 'active',
     ad_type: adType,
-    country: country.toUpperCase(),  // support any country
+    country: country.toUpperCase(),
     media_type: mediaType,
     q: query,
     search_type: 'keyword_unordered',
@@ -29,10 +29,13 @@ async function autoScroll(page, maxScrolls) {
       window.scrollTo(0, document.body.scrollHeight);
       return document.body.scrollHeight;
     });
-    await page.waitForTimeout(1800);
+    // FIX (Bug 4): Increased settle time so lazy-loaded images finish loading
+    await page.waitForTimeout(2500);
     if (newHeight === prevHeight) break;
     prevHeight = newHeight;
   }
+  // FIX (Bug 4): Final wait after last scroll for any remaining image hydration
+  await page.waitForTimeout(2000);
 }
 
 /**
@@ -41,15 +44,64 @@ async function autoScroll(page, maxScrolls) {
  */
 async function extractAds(page, hardLimit) {
   return page.evaluate((HARD_LIMIT) => {
+    // ─────────────────────────────────────────────────────────────────────────
+    // FIX (Bug 1 — CRITICAL): cleanMediaUrl MUST be declared first, before any
+    // call site. Previously it was defined inside the for-loop body AFTER the
+    // .map(cleanMediaUrl) calls, so it was undefined when those ran, causing a
+    // runtime error that silently swallowed all image extraction results.
+    // FIX (Bug 2): Keep oh/oe — they are Meta CDN auth tokens. Removing them
+    // causes 403s. Only strip pure tracking params that don't affect delivery.
+    // ─────────────────────────────────────────────────────────────────────────
+    function cleanMediaUrl(url) {
+      if (!url) return '';
+      try {
+        const u = new URL(url);
+        // Strip only pure analytics params — do NOT remove oh/oe (CDN auth)
+        u.searchParams.delete('_nc_cat');
+        u.searchParams.delete('_nc_ohc');
+        u.searchParams.delete('ccb');
+        // Keep: oh, oe, _nc_sid, _nc_hash, stp, fbid — all required for CDN auth
+        return u.toString();
+      } catch (_) {
+        return url;
+      }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // FIX (Bug 3): Removed static.xx.fbcdn from the exclusion list.
+    // static.xx.fbcdn.net is Meta's primary ad creative CDN. The old filter
+    // was silently dropping legitimate ad images.
+    // Only exclude known non-content asset paths (/rsrc.php, /emoji.php).
+    // ─────────────────────────────────────────────────────────────────────────
+    function isAdImage(src) {
+      if (!src) return false;
+      if (src.startsWith('data:') || src.startsWith('blob:')) return false;
+      if (!/scontent|fbcdn|cdninstagram|fbexternal/i.test(src)) return false;
+      // Exclude UI chrome assets only (not CDN domain wholesale)
+      if (/\/rsrc\.php|\/emoji\.php|\/favicon/i.test(src)) return false;
+      return true;
+    }
+
     const out = [];
     const seen = new Set();
 
     // Strategy 1: identify cards by the visible "Library ID:" marker (most stable signal)
     const allNodes = Array.from(document.querySelectorAll('div'));
-    const candidates = allNodes.filter((n) => {
+
+    // FIX (Bug 5): Select the INNERMOST node containing "Library ID:" to avoid
+    // selecting large parent containers that inflate text length and cause
+    // incorrect card boundaries (which skewed results toward large advertisers
+    // like Amazon/Temu who have very large card footprints).
+    const allCandidates = allNodes.filter((n) => {
       const t = (n.innerText || '').trim();
       return /Library ID:\s*\d+/i.test(t) && t.length < 4000 && n.querySelector('img,video');
     });
+
+    // Keep only innermost: discard any node whose child is also a candidate
+    const candidateSet = new Set(allCandidates);
+    const candidates = allCandidates.filter(
+      (n) => !Array.from(n.querySelectorAll('div')).some((child) => candidateSet.has(child))
+    );
 
     for (const card of candidates) {
       if (out.length >= HARD_LIMIT) break;
@@ -60,10 +112,10 @@ async function extractAds(page, hardLimit) {
       if (seen.has(adId)) continue;
       seen.add(adId);
 
-      // Page / advertiser name — usually the first prominent link with role=link or anchor to /<pageName>/
+      // Page / advertiser name
       let pageName = '';
       let pageUrl = '';
-      let pageId = ''; // Extract numeric page ID for Meta Ads Library links
+      let pageId = '';
       const links = card.querySelectorAll('a[role="link"], a[href*="facebook.com"]');
       for (const a of links) {
         const t = (a.innerText || '').trim();
@@ -71,16 +123,13 @@ async function extractAds(page, hardLimit) {
         if (t && !pageName && !/Library ID/i.test(t) && t.length < 80 && /facebook\.com\//.test(h)) {
           pageName = t;
           pageUrl = h;
-          // Extract page ID from URL patterns like /123456789/ or ?id=123456789
           const pageIdMatch = h.match(/\/(\d{6,})(?:\/|$|\?)/);
           if (pageIdMatch) pageId = pageIdMatch[1];
           break;
         }
       }
 
-      // Generate Meta Ads Library link
-      // Format: https://www.facebook.com/ads/library/?id=<adId>
-      // or fallback to advertiser page: https://www.facebook.com/ads/library/?active_status=all&ad_type=all&country=ALL&view_all_page_id=<pageId>
+      // Meta Ads Library link
       let metaAdsLibraryUrl = '';
       if (adId) {
         metaAdsLibraryUrl = `https://www.facebook.com/ads/library/?id=${adId}`;
@@ -88,20 +137,20 @@ async function extractAds(page, hardLimit) {
         metaAdsLibraryUrl = `https://www.facebook.com/ads/library/?active_status=all&ad_type=all&country=ALL&view_all_page_id=${pageId}&search_type=page&media_type=all`;
       }
 
-      // "Started running on Mon DD, YYYY"
+      // Start date
       const startMatch = text.match(/Started running on\s+([A-Za-z]{3,9}\s+\d{1,2},?\s*\d{4})/i);
       const startDate = startMatch ? startMatch[1] : null;
 
-      // Active vs Inactive
+      // Active status
       const isActive = /\bActive\b/i.test(text) && !/Inactive/i.test(text.split('Library ID')[0] || '');
 
-      // Platforms (Facebook, Instagram, Messenger, Audience Network)
+      // Platforms
       const platforms = [];
       ['Facebook', 'Instagram', 'Messenger', 'Audience Network', 'Threads'].forEach((p) => {
         if (new RegExp('\\b' + p + '\\b').test(text)) platforms.push(p);
       });
 
-      // CTA button — common patterns
+      // CTA
       let cta = '';
       const ctaCandidates = card.querySelectorAll('div[role="button"], a[role="button"]');
       for (const b of ctaCandidates) {
@@ -116,7 +165,7 @@ async function extractAds(page, hardLimit) {
         }
       }
 
-      // Landing URL — anchor outside facebook.com (the click-through URL)
+      // Landing URL
       let landingUrl = '';
       const allAnchors = card.querySelectorAll('a[href]');
       for (const a of allAnchors) {
@@ -127,87 +176,114 @@ async function extractAds(page, hardLimit) {
         }
       }
 
-      // Media — Enhanced extraction with multiple comprehensive strategies
-      // Strategy 1: Direct img tags with CDN URLs
+      // ───────────────────────────────────────────────────────────────────────
+      // MEDIA EXTRACTION
+      // cleanMediaUrl and isAdImage are now defined above the loop (Bug 1 fix).
+      // ───────────────────────────────────────────────────────────────────────
+
+      // Strategy 1: Direct img tags — check all src variants including currentSrc
       const imgs = Array.from(card.querySelectorAll('img'))
-        .map((i) => i.src || i.getAttribute('src') || i.getAttribute('data-src') || i.currentSrc || i.getAttribute('data-img-src'))
-        .filter((s) => s && !s.startsWith('data:') && !s.startsWith('blob:') && (
-          /scontent|fbcdn|cdninstagram|fbexternal/i.test(s) && 
-          !/logo|icon|emoji|static\.xx\.fbcdn/i.test(s)
-        ))
+        .flatMap((i) => [
+          i.currentSrc,        // highest priority: what the browser actually loaded
+          i.src,
+          i.getAttribute('src'),
+          i.getAttribute('data-src'),
+          i.getAttribute('data-img-src'),
+          i.getAttribute('data-lazy-src'),
+        ])
+        .filter(isAdImage)
         .map(cleanMediaUrl);
 
       // Strategy 2: Background images from inline styles
       const bgImages = Array.from(card.querySelectorAll('[style*="background-image"], [style*="background:"]'))
-        .map(el => {
+        .map((el) => {
           const style = el.getAttribute('style') || '';
           const match = style.match(/url\(['"]?([^'"()]+)['"]?\)/);
           return match && match[1] ? match[1] : null;
         })
-        .filter(s => s)
+        .filter(isAdImage)
         .map(cleanMediaUrl);
 
-      // Strategy 3: Picture/source elements (for responsive images)
+      // Strategy 3: Picture/source srcset
       const pictureImages = Array.from(card.querySelectorAll('picture source[srcset], source[srcset]'))
-        .flatMap(source => {
+        .flatMap((source) => {
           const srcset = source.getAttribute('srcset') || '';
-          return srcset.split(',').map(s => s.trim().split(' ')[0]);
+          // Pick the highest-resolution candidate from srcset
+          return srcset
+            .split(',')
+            .map((s) => s.trim().split(' ')[0])
+            .filter(Boolean);
         })
-        .filter(s => s)
+        .filter(isAdImage)
         .map(cleanMediaUrl);
 
-      // Strategy 4: Data attributes commonly used by Meta
-      const dataImages = Array.from(card.querySelectorAll('[data-src], [data-img], [data-image-url]'))
-        .map(el => el.getAttribute('data-src') || el.getAttribute('data-img') || el.getAttribute('data-image-url'))
-        .filter(s => s)
+      // Strategy 4: Data attributes
+      const dataImages = Array.from(
+        card.querySelectorAll('[data-src], [data-img], [data-image-url], [data-lazy-src]')
+      )
+        .map(
+          (el) =>
+            el.getAttribute('data-src') ||
+            el.getAttribute('data-img') ||
+            el.getAttribute('data-image-url') ||
+            el.getAttribute('data-lazy-src')
+        )
+        .filter(isAdImage)
         .map(cleanMediaUrl);
 
-      // Merge all images and deduplicate
-      const allImages = [...imgs, ...bgImages, ...pictureImages, ...dataImages];
+      // Strategy 5: CSS computed style background-image (catches dynamically set styles)
+      const computedBgImages = Array.from(card.querySelectorAll('div, span'))
+        .map((el) => {
+          try {
+            const bg = window.getComputedStyle(el).backgroundImage;
+            if (!bg || bg === 'none') return null;
+            const match = bg.match(/url\(['"]?([^'"()]+)['"]?\)/);
+            return match ? match[1] : null;
+          } catch (_) {
+            return null;
+          }
+        })
+        .filter(isAdImage)
+        .map(cleanMediaUrl);
+
+      // Merge and deduplicate — prioritise direct img sources
+      const allImages = [...imgs, ...bgImages, ...pictureImages, ...dataImages, ...computedBgImages];
       const uniqueImages = [...new Set(allImages)].filter(Boolean);
 
-      // Video extraction with enhanced detection
+      // Video extraction
       const videos = Array.from(card.querySelectorAll('video'))
         .map((v) => {
-          const src = v.src || v.getAttribute('src') || v.getAttribute('data-video-src') || (v.querySelector('source') || {}).src;
-          const poster = v.poster || v.getAttribute('poster') || v.getAttribute('data-poster');
-          return { src: src ? cleanMediaUrl(src) : '', poster: poster ? cleanMediaUrl(poster) : '' };
+          const src =
+            v.currentSrc ||
+            v.src ||
+            v.getAttribute('src') ||
+            v.getAttribute('data-video-src') ||
+            (v.querySelector('source') || {}).src ||
+            '';
+          const poster =
+            v.poster ||
+            v.getAttribute('poster') ||
+            v.getAttribute('data-poster') ||
+            '';
+          return {
+            src: src ? cleanMediaUrl(src) : '',
+            poster: poster ? cleanMediaUrl(poster) : '',
+          };
         })
         .filter((v) => v.src || v.poster);
 
-      // Strategy 5: Check for video indicators and extract from data attributes
-      const videoDataElements = Array.from(card.querySelectorAll('[data-video-url], [data-video-src]'));
-      videoDataElements.forEach(el => {
+      // Data-attribute video elements
+      Array.from(card.querySelectorAll('[data-video-url], [data-video-src]')).forEach((el) => {
         const videoUrl = el.getAttribute('data-video-url') || el.getAttribute('data-video-src');
-        if (videoUrl && !videos.some(v => v.src === videoUrl)) {
+        if (videoUrl && !videos.some((v) => v.src === videoUrl)) {
           videos.push({ src: cleanMediaUrl(videoUrl), poster: '' });
         }
       });
 
-      const hasVideoIndicator = card.querySelector('[aria-label*="play" i], [aria-label*="video" i], [class*="video"]');
-      
       const videoSrc = videos[0]?.src || '';
       const videoPoster = videos[0]?.poster || uniqueImages[0] || '';
 
-      // Helper to clean and optimize media URLs
-      function cleanMediaUrl(url) {
-        if (!url) return '';
-        try {
-          const u = new URL(url);
-          // Remove tracking params but keep essential CDN params
-          u.searchParams.delete('_nc_cat');
-          u.searchParams.delete('_nc_ohc');
-          u.searchParams.delete('ccb');
-          u.searchParams.delete('oh');
-          u.searchParams.delete('oe');
-          // Keep fbid, stp for CDN routing
-          return u.toString();
-        } catch (_) {
-          return url;
-        }
-      }
-
-      // Ad copy (primary text) — take the longest text block in the card that isn't metadata
+      // Ad copy
       const blocks = Array.from(card.querySelectorAll('div, span, p'))
         .map((n) => (n.innerText || '').trim())
         .filter(
@@ -221,11 +297,13 @@ async function extractAds(page, hardLimit) {
         .sort((a, b) => b.length - a.length);
       const adCopy = blocks[0] || '';
 
-      // Headline (smaller, often above CTA)
+      // Headline
       let headline = '';
       const headlineCandidates = Array.from(card.querySelectorAll('div, span, h2, h3'))
         .map((n) => (n.innerText || '').trim())
-        .filter((t) => t && t.length > 4 && t.length < 120 && t !== pageName && t !== cta && !/Library ID/i.test(t));
+        .filter(
+          (t) => t && t.length > 4 && t.length < 120 && t !== pageName && t !== cta && !/Library ID/i.test(t)
+        );
       if (headlineCandidates.length) headline = headlineCandidates[0];
 
       out.push({
@@ -241,12 +319,8 @@ async function extractAds(page, hardLimit) {
         imageUrl: uniqueImages[0] || videoPoster || '',
         imageUrls: uniqueImages.slice(0, 6),
         videoUrl: videoSrc,
-        videoPoster: videoPoster,
-        mediaType: (videoSrc || videoPoster)
-  ? 'video'
-  : uniqueImages.length
-  ? 'image'
-  : 'unknown',
+        videoPoster,
+        mediaType: videoSrc ? 'video' : uniqueImages.length ? 'image' : 'unknown',
         platforms,
         isActive,
         startDate,
@@ -272,17 +346,16 @@ async function scrape({ query, country = 'US', limit, mediaType = 'all', adType 
   const started = Date.now();
   const ads = await withPage(async (page) => {
     page.setDefaultNavigationTimeout(config.scraper.navigationTimeoutMs);
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: config.scraper.navigationTimeoutMs });
+
+    // FIX (Bug 4): Use networkidle instead of domcontentloaded so React hydration
+    // and initial image loads complete before we start extracting.
+    await page.goto(url, { waitUntil: 'networkidle', timeout: config.scraper.navigationTimeoutMs });
+
     // Dismiss cookie/login dialogs if any
-    try {
-      await page.locator('[aria-label="Allow all cookies"]').click({ timeout: 2500 });
-    } catch (_) {}
-    try {
-      await page.locator('[aria-label="Decline optional cookies"]').click({ timeout: 2500 });
-    } catch (_) {}
-    try {
-      await page.locator('div[role="dialog"] [aria-label="Close"]').click({ timeout: 2500 });
-    } catch (_) {}
+    try { await page.locator('[aria-label="Allow all cookies"]').click({ timeout: 2500 }); } catch (_) {}
+    try { await page.locator('[aria-label="Decline optional cookies"]').click({ timeout: 2500 }); } catch (_) {}
+    try { await page.locator('div[role="dialog"] [aria-label="Close"]').click({ timeout: 2500 }); } catch (_) {}
+
     // Wait for at least one "Library ID" marker
     try {
       await page.waitForFunction(
@@ -292,6 +365,15 @@ async function scrape({ query, country = 'US', limit, mediaType = 'all', adType 
     } catch (_) {
       log.warn('[scrape] no Library ID marker found within 15s');
     }
+
+    // FIX (Bug 4): Wait for at least one actual CDN image to appear in DOM
+    // before scrolling — confirms the page has hydrated image sources.
+    try {
+      await page.waitForSelector('img[src*="fbcdn"], img[src*="scontent"]', { timeout: 8000 });
+    } catch (_) {
+      log.warn('[scrape] no fbcdn images found after hydration wait — images may be missing');
+    }
+
     await autoScroll(page, config.scraper.maxScrolls);
     return extractAds(page, finalLimit);
   });
@@ -324,12 +406,15 @@ async function scrapeAdvertiser({ pageId, limit, country = 'US' }) {
   const started = Date.now();
   const ads = await withPage(async (page) => {
     page.setDefaultNavigationTimeout(config.scraper.navigationTimeoutMs);
-    await page.goto(url, { waitUntil: 'domcontentloaded' });
+    await page.goto(url, { waitUntil: 'networkidle' });
     try {
       await page.waitForFunction(
         () => /Library ID:\s*\d+/.test(document.body.innerText || ''),
         { timeout: 15000 }
       );
+    } catch (_) {}
+    try {
+      await page.waitForSelector('img[src*="fbcdn"], img[src*="scontent"]', { timeout: 8000 });
     } catch (_) {}
     await autoScroll(page, config.scraper.maxScrolls);
     return extractAds(page, finalLimit);
