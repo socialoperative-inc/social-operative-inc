@@ -10,6 +10,39 @@ const ENTERPRISE_DOMAINS = [
   'shein.com', 'wish.com', 'bestbuy.com', 'homedepot.com', 'lowes.com', 'costco.com',
   'samsclub.com', 'wayfair.com', 'overstock.com', 'jcpenney.com', 'kohls.com',
   'macys.com', 'nordstrom.com', 'bloomingdales.com', 'sears.com', 'kmart.com',
+  'tiktok.com', 'tiktokshop.com', 'meta.com', 'instagram.com', 'whatsapp.com',
+  'facebook.com', 'pinterest.com', 'snapchat.com', 'youtube.com', 'google.com',
+  'microsoft.com', 'apple.com', 'samsung.com', 'lg.com', 'sony.com',
+  'expedia.com', 'booking.com', 'airbnb.com', 'uber.com', 'doordash.com',
+  'grubhub.com', 'instacart.com', 'wayfair.com', 'etsy.com',
+];
+
+// Enterprise / marketplace brand names that frequently appear as Page Names.
+// Matched case-insensitively against full pageName or its tokens.
+// Critical because Meta wraps click-throughs in l.facebook.com so landingUrl
+// is sometimes empty and domain-based detection alone misses these brands.
+const ENTERPRISE_PAGE_NAMES = [
+  'amazon', 'amazon beauty', 'amazon fashion', 'amazon prime', 'amazon shopping',
+  'amazon music', 'amazon kids', 'amazon basics', 'amazon ads', 'amazon devices',
+  'amazon home', 'amazon fresh', 'amazon books', 'amazon games', 'amazon kindle',
+  'amazon prime video', 'amazon prime gaming', 'amazon advertising',
+  'temu',
+  'shein',
+  'aliexpress', 'alibaba',
+  'walmart', 'target', 'ebay', 'wish', 'best buy',
+  'tiktok', 'tiktok shop', 'tiktok - us', 'tiktok ads',
+  'instagram', 'facebook', 'meta', 'whatsapp', 'messenger', 'threads',
+  'google', 'google ads', 'google play', 'youtube', 'youtube music', 'youtube tv',
+  'microsoft', 'xbox', 'office 365', 'linkedin',
+  'apple', 'apple music', 'apple tv',
+  'pinterest', 'snapchat', 'reddit', 'x corp', 'twitter',
+  'expedia', 'booking.com', 'booking', 'airbnb', 'uber', 'uber eats', 'lyft',
+  'doordash', 'grubhub', 'instacart', 'etsy', 'wayfair',
+  'samsung', 'lg', 'sony', 'huawei', 'xiaomi',
+  'nike', 'adidas', 'gap', 'h&m', 'zara',
+  'shopify', 'klarna', 'paypal', 'venmo', 'cash app',
+  'chime', 'sofi', 'capital one', 'american express', 'visa', 'mastercard',
+  'netflix', 'disney+', 'hulu', 'hbo max', 'paramount+', 'peacock', 'spotify',
 ];
 
 const SHOPIFY_SIGNALS = [
@@ -58,6 +91,33 @@ function isEnterpriseDomain(url) {
 }
 
 /**
+ * Detect if pageName matches a known enterprise/marketplace brand.
+ * Critical: Meta wraps destination URLs in l.facebook.com, so landingUrl
+ * is often empty. Page-name matching is our primary defence against
+ * Amazon / Temu / TikTok / Shein dominating niche searches.
+ */
+function isEnterprisePageName(pageName) {
+  if (!pageName) return false;
+  const normalized = String(pageName).trim().toLowerCase();
+  if (!normalized) return false;
+  for (const brand of ENTERPRISE_PAGE_NAMES) {
+    if (normalized === brand) return true;
+    if (normalized.startsWith(brand + ' ')) return true;
+    if (normalized.startsWith(brand + ' - ')) return true;
+    if (normalized.startsWith(brand + ': ')) return true;
+    if (normalized.endsWith(' ' + brand)) return true;
+  }
+  return false;
+}
+
+/**
+ * Combined enterprise detection — either by URL or by page name.
+ */
+function isEnterpriseBrand(ad) {
+  return isEnterpriseDomain(ad?.landingUrl) || isEnterprisePageName(ad?.pageName);
+}
+
+/**
  * Detect Shopify signals in landing URL.
  */
 function detectShopify(url) {
@@ -74,9 +134,10 @@ function detectShopify(url) {
 function scoreEcommerceLikelihood(ad) {
   let score = 50;  // baseline
 
-  // Negative signals (reduce score heavily)
-  if (isEnterpriseDomain(ad.landingUrl)) {
-    score -= 50;  // HEAVY penalty for Amazon/Temu/etc (increased from 40)
+  // Negative signals — HARD reject for enterprise brands by domain OR name.
+  // Score is clamped to 0 so they always fall below any minScore filter.
+  if (isEnterpriseBrand(ad)) {
+    return 0;
   }
 
   // Positive signals (increase score)
@@ -132,7 +193,7 @@ function scoreEcommerceLikelihood(ad) {
  * Classify brand type.
  */
 function classifyBrandType(ad, ecommerceScore) {
-  if (isEnterpriseDomain(ad.landingUrl)) return 'enterprise-marketplace';
+  if (isEnterpriseBrand(ad)) return 'enterprise-marketplace';
   if (detectShopify(ad.landingUrl)) return 'shopify-dtc';
   if (ecommerceScore >= 70) return 'dtc-ecommerce';
   if (ecommerceScore >= 50) return 'small-ecommerce';
@@ -158,5 +219,7 @@ module.exports = {
   classifyBrandType,
   filterEcommerce,
   isEnterpriseDomain,
+  isEnterprisePageName,
+  isEnterpriseBrand,
   detectShopify,
 };

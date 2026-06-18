@@ -116,18 +116,45 @@ async function extractAds(page, hardLimit) {
         }
       }
 
-      // Landing URL — anchor outside facebook.com (the click-through URL)
+      // Landing URL — Meta wraps click-throughs in l.facebook.com/l.php?u=<encoded>.
+      // We must decode those wrappers to recover the true destination domain,
+      // otherwise downstream Amazon/Temu detection never fires.
       let landingUrl = '';
       const allAnchors = card.querySelectorAll('a[href]');
       for (const a of allAnchors) {
         const h = a.href || '';
-        if (h && !/facebook\.com/i.test(h) && !/^javascript:/i.test(h) && /^https?:\/\//i.test(h)) {
+        if (!h || /^javascript:/i.test(h) || !/^https?:\/\//i.test(h)) continue;
+
+        // Case A: Facebook redirect wrapper — extract the `u` param.
+        try {
+          const u = new URL(h);
+          if (/(^|\.)facebook\.com$/i.test(u.hostname) && u.pathname === '/l.php') {
+            const dest = u.searchParams.get('u');
+            if (dest) {
+              landingUrl = decodeURIComponent(dest);
+              break;
+            }
+          }
+        } catch (_) {}
+
+        // Case B: Direct external anchor.
+        if (!/facebook\.com/i.test(h)) {
           landingUrl = h;
           break;
         }
       }
 
-      // Media — Enhanced extraction with multiple comprehensive strategies
+      // Media — Enhanced extraction with multiple comprehensive strategies.
+      //
+      // CRITICAL: Meta's scontent/fbcdn URLs are SIGNED. The `oh` (HMAC) and
+      // `oe` (expiry timestamp) query params are mandatory — strip them and
+      // the CDN returns 403 Forbidden. `ccb`, `_nc_cat`, `_nc_ohc` are also
+      // load-balancing routing hints required for the same reason. We keep
+      // the URL verbatim. Do NOT modify these URLs.
+      function cleanMediaUrl(url) {
+        return typeof url === 'string' ? url : '';
+      }
+
       // Strategy 1: Direct img tags with CDN URLs
       const imgs = Array.from(card.querySelectorAll('img'))
         .map((i) => i.src || i.getAttribute('src') || i.getAttribute('data-src') || i.currentSrc || i.getAttribute('data-img-src'))
@@ -189,23 +216,9 @@ async function extractAds(page, hardLimit) {
       const videoSrc = videos[0]?.src || '';
       const videoPoster = videos[0]?.poster || uniqueImages[0] || '';
 
-      // Helper to clean and optimize media URLs
-      function cleanMediaUrl(url) {
-        if (!url) return '';
-        try {
-          const u = new URL(url);
-          // Remove tracking params but keep essential CDN params
-          u.searchParams.delete('_nc_cat');
-          u.searchParams.delete('_nc_ohc');
-          u.searchParams.delete('ccb');
-          u.searchParams.delete('oh');
-          u.searchParams.delete('oe');
-          // Keep fbid, stp for CDN routing
-          return u.toString();
-        } catch (_) {
-          return url;
-        }
-      }
+      // (cleanMediaUrl is declared at the top of this card's scope above —
+      //  it now intentionally passes URLs through verbatim so we don't break
+      //  Meta's signed CDN URLs.)
 
       // Ad copy (primary text) — take the longest text block in the card that isn't metadata
       const blocks = Array.from(card.querySelectorAll('div, span, p'))
