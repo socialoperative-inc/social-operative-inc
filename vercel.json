@@ -1,0 +1,22 @@
+{
+  "buildCommand": "yarn build",
+  "installCommand": "yarn install",
+  "framework": "nextjs",
+  "functions": {
+    "app/api/[[...path]]/route.js": {
+      "maxDuration": 60
+    },
+    "app/api/health/route.js": {
+      "maxDuration": 10
+    },
+    "app/api/diag/openrouter/route.js": {
+      "maxDuration": 30
+    },
+    "app/api/diag/mongo/route.js": {
+      "maxDuration": 15
+    }
+  },
+  "env": {
+    "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD": "1"
+  }
+}

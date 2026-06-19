@@ -8,13 +8,14 @@ import {
   Zap, TrendingUp, Activity, Database, Cpu, Globe, Image as ImageIcon,
   Trash2, Copy, Check, Loader2, Bookmark, Play, ArrowUpRight, Sparkle,
   Shield, Brain, Rocket, Eye, Command, Menu, X, LogOut, Mail, Lock, User,
-  AlertCircle, Wifi, WifiOff, Download
+  AlertCircle, Wifi, WifiOff, Download, Store
 } from 'lucide-react';
 import {
   LineChart, Line, ResponsiveContainer, XAxis, YAxis, Tooltip, AreaChart, Area,
   BarChart, Bar, PieChart, Pie, Cell
 } from 'recharts';
 import MetaAdsIntelligenceView from '../components/meta-ads/MetaAdsIntelligenceView';
+import CommerceHubView from '../components/commerce-hub/CommerceHubView';
 
 // ============================================================================
 // AUTH CONTEXT
@@ -191,6 +192,7 @@ const SIDEBAR_ITEMS = [
   { id: 'support', label: 'Support Operative', icon: MessageCircle },
   { id: 'content', label: 'Content Studio', icon: Sparkles },
   { id: 'competitor', label: 'Competitor Intelligence', icon: Search },
+  { id: 'commerce-hub', label: 'Commerce Hub', icon: Store },
   { id: 'analytics', label: 'Analytics', icon: BarChart3 },
   { id: 'workflows', label: 'Workflows', icon: Workflow },
   { id: 'uploads', label: 'Upload Center', icon: Upload },
@@ -1516,6 +1518,7 @@ function MainApp() {
                 />
               )}
               {AGENTS[view] && view !== 'meta-ads' && <AgentView agentKey={view} model={model} />}
+              {view === 'commerce-hub' && <CommerceHubView apiFetch={apiFetch} toast={toast} />}
               {view === 'analytics' && <AnalyticsView />}
               {view === 'workflows' && <WorkflowsView />}
               {view === 'uploads' && <UploadView />}
