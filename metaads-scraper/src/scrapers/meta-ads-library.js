@@ -116,12 +116,31 @@ async function extractAds(page, hardLimit) {
         }
       }
 
-      // Landing URL — anchor outside facebook.com (the click-through URL)
+      // Landing URL — capture the click-through destination.
+      // Meta wraps every external click as: https://l.facebook.com/l.php?u=<URL-encoded real URL>&h=...
+      // We must UNWRAP this redirect, otherwise enterprise advertisers like
+      // Amazon / Temu / AliExpress are not detected (their real domain hides
+      // inside the `u` query param).
       let landingUrl = '';
       const allAnchors = card.querySelectorAll('a[href]');
       for (const a of allAnchors) {
         const h = a.href || '';
-        if (h && !/facebook\.com/i.test(h) && !/^javascript:/i.test(h) && /^https?:\/\//i.test(h)) {
+        if (!h || /^javascript:/i.test(h) || !/^https?:\/\//i.test(h)) continue;
+
+        // Case A: l.facebook.com / lm.facebook.com redirect → unwrap real URL
+        const redirectMatch = h.match(/^https?:\/\/l[m]?\.facebook\.com\/l\.php\?(?:[^#]*&)?u=([^&#]+)/i);
+        if (redirectMatch) {
+          try {
+            const unwrapped = decodeURIComponent(redirectMatch[1]);
+            if (/^https?:\/\//i.test(unwrapped)) {
+              landingUrl = unwrapped;
+              break;
+            }
+          } catch (_) { /* fall through */ }
+        }
+
+        // Case B: direct external link (not on facebook.com)
+        if (!/facebook\.com/i.test(h)) {
           landingUrl = h;
           break;
         }
@@ -135,7 +154,7 @@ async function extractAds(page, hardLimit) {
           /scontent|fbcdn|cdninstagram|fbexternal/i.test(s) && 
           !/logo|icon|emoji|static\.xx\.fbcdn/i.test(s)
         ))
-        .map(cleanMediaUrl);
+        .map(preserveMediaUrl);
 
       // Strategy 2: Background images from inline styles
       const bgImages = Array.from(card.querySelectorAll('[style*="background-image"], [style*="background:"]'))
@@ -145,7 +164,7 @@ async function extractAds(page, hardLimit) {
           return match && match[1] ? match[1] : null;
         })
         .filter(s => s && /scontent|fbcdn|cdninstagram/i.test(s))
-        .map(cleanMediaUrl);
+        .map(preserveMediaUrl);
 
       // Strategy 3: Picture/source elements (for responsive images)
       const pictureImages = Array.from(card.querySelectorAll('picture source[srcset], source[srcset]'))
@@ -154,13 +173,13 @@ async function extractAds(page, hardLimit) {
           return srcset.split(',').map(s => s.trim().split(' ')[0]);
         })
         .filter(s => s && /scontent|fbcdn/i.test(s))
-        .map(cleanMediaUrl);
+        .map(preserveMediaUrl);
 
       // Strategy 4: Data attributes commonly used by Meta
       const dataImages = Array.from(card.querySelectorAll('[data-src], [data-img], [data-image-url]'))
         .map(el => el.getAttribute('data-src') || el.getAttribute('data-img') || el.getAttribute('data-image-url'))
         .filter(s => s && /scontent|fbcdn/i.test(s))
-        .map(cleanMediaUrl);
+        .map(preserveMediaUrl);
 
       // Merge all images and deduplicate
       const allImages = [...imgs, ...bgImages, ...pictureImages, ...dataImages];
@@ -171,7 +190,7 @@ async function extractAds(page, hardLimit) {
         .map((v) => {
           const src = v.src || v.getAttribute('src') || v.getAttribute('data-video-src') || (v.querySelector('source') || {}).src;
           const poster = v.poster || v.getAttribute('poster') || v.getAttribute('data-poster');
-          return { src: src ? cleanMediaUrl(src) : '', poster: poster ? cleanMediaUrl(poster) : '' };
+          return { src: src ? preserveMediaUrl(src) : '', poster: poster ? preserveMediaUrl(poster) : '' };
         })
         .filter((v) => v.src || v.poster);
 
@@ -180,7 +199,7 @@ async function extractAds(page, hardLimit) {
       videoDataElements.forEach(el => {
         const videoUrl = el.getAttribute('data-video-url') || el.getAttribute('data-video-src');
         if (videoUrl && !videos.some(v => v.src === videoUrl)) {
-          videos.push({ src: cleanMediaUrl(videoUrl), poster: '' });
+          videos.push({ src: preserveMediaUrl(videoUrl), poster: '' });
         }
       });
 
@@ -189,21 +208,31 @@ async function extractAds(page, hardLimit) {
       const videoSrc = videos[0]?.src || '';
       const videoPoster = videos[0]?.poster || uniqueImages[0] || '';
 
-      // Helper to clean and optimize media URLs
-      function cleanMediaUrl(url) {
-        if (!url) return '';
+      // -----------------------------------------------------------------------
+      // CRITICAL: Meta fbcdn URLs are HMAC-signed. Any modification (including
+      // removing "optional" params) will break the signature and produce HTTP
+      // 403 Forbidden / "Bad URL hash" errors when the browser loads the image.
+      //
+      // Required signed params on fbcdn URLs:
+      //   - oh    : HMAC signature (Origin Hash)
+      //   - oe    : Origin Expiry (Unix timestamp)
+      //   - ccb   : Cache Control Byte (version)
+      //   - _nc_ohc : Resource handle (server-specific)
+      //   - _nc_oc / _nc_zt / _nc_ht / _nc_gid / _nc_sid : routing metadata
+      //
+      // Therefore preserveMediaUrl is a PASS-THROUGH that only validates the
+      // URL is parseable. DO NOT strip any query parameters here.
+      // -----------------------------------------------------------------------
+      function preserveMediaUrl(url) {
+        if (!url || typeof url !== 'string') return '';
+        // Trim whitespace + decode HTML entities Facebook sometimes injects
+        const trimmed = url.trim().replace(/&amp;/g, '&');
         try {
-          const u = new URL(url);
-          // Remove tracking params but keep essential CDN params
-          u.searchParams.delete('_nc_cat');
-          u.searchParams.delete('_nc_ohc');
-          u.searchParams.delete('ccb');
-          u.searchParams.delete('oh');
-          u.searchParams.delete('oe');
-          // Keep fbid, stp for CDN routing
-          return u.toString();
+          // Validate it's a parseable absolute URL — do not touch params.
+          new URL(trimmed);
+          return trimmed;
         } catch (_) {
-          return url;
+          return '';
         }
       }
 
